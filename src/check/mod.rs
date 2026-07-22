@@ -72,6 +72,15 @@ impl Registry {
             .map(|c| (c.type_id(), c.schema()))
             .collect()
     }
+
+    /// A registry pre-loaded with every built-in check type.
+    pub fn with_builtins() -> Self {
+        let mut reg = Registry::new();
+        reg.register(Arc::new(crate::check::http::HttpCheck));
+        reg.register(Arc::new(crate::check::tcp::TcpCheck));
+        reg.register(Arc::new(crate::check::frigate::FrigateCameraCheck));
+        reg
+    }
 }
 
 pub mod frigate;
@@ -111,5 +120,14 @@ mod tests {
         let report = reg.run("nope", &Value::Null).await;
         assert_eq!(report.status, Status::Unknown);
         assert!(report.message.contains("nope"));
+    }
+
+    #[test]
+    fn with_builtins_registers_all_three() {
+        let reg = Registry::with_builtins();
+        assert!(reg.get("http").is_some());
+        assert!(reg.get("tcp").is_some());
+        assert!(reg.get("frigate-camera").is_some());
+        assert_eq!(reg.schemas().len(), 3);
     }
 }

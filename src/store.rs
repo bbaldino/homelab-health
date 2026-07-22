@@ -1,19 +1,26 @@
-use crate::report::CheckReport;
+use crate::report::{CheckReport, Component};
 use crate::status::Status;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
+#[derive(Debug, Deserialize)]
 pub struct NewMonitor {
     pub name: String,
     pub type_id: String,
     pub config: Value,
     pub interval_secs: i64,
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone)]
+fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Monitor {
     pub id: i64,
     pub name: String,
@@ -23,6 +30,17 @@ pub struct Monitor {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MonitorStatus {
+    #[serde(flatten)]
+    pub monitor: Monitor,
+    pub status: Option<Status>,
+    pub message: Option<String>,
+    pub components: Vec<Component>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
 }
@@ -42,11 +60,18 @@ fn row_to_monitor(row: SqliteRow) -> Result<Monitor, sqlx::Error> {
 impl Store {
     pub async fn connect(url: &str) -> Result<Store, sqlx::Error> {
         // create_if_missing so a fresh file-backed DB is bootstrapped on first run;
-        // harmless for sqlite::memory:. max_connections(1) keeps an in-memory DB
-        // alive for the whole test.
-        let options = SqliteConnectOptions::from_str(url)?.create_if_missing(true);
+        // harmless for sqlite::memory:. In-memory DBs stay at 1 connection so tests
+        // that depend on single connection behaviour still work.
+        let is_memory = url.contains(":memory:") || url.contains("mode=memory");
+        let max_conns = if is_memory { 1 } else { 5 };
+        let mut options = SqliteConnectOptions::from_str(url)?.create_if_missing(true);
+        if !is_memory {
+            options = options
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .busy_timeout(std::time::Duration::from_secs(5));
+        }
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(max_conns)
             .connect_with(options)
             .await?;
         // raw_sql (not query) so BOTH CREATE TABLE statements run.
@@ -101,8 +126,8 @@ impl Store {
         monitor_id: i64,
         report: &CheckReport,
     ) -> Result<(), sqlx::Error> {
-        let status = serde_json::to_string(&report.status).unwrap();
-        let components = serde_json::to_string(&report.components).unwrap();
+        let status = serde_json::to_string(&report.status).unwrap_or_default();
+        let components = serde_json::to_string(&report.components).unwrap_or_default();
         sqlx::query(
             "INSERT INTO status_current (monitor_id, status, message, components_json, updated_at)
              VALUES (?1, ?2, ?3, ?4, datetime('now'))
@@ -138,6 +163,102 @@ impl Store {
                 Ok(Some((status, message)))
             }
             None => Ok(None),
+        }
+    }
+
+    pub async fn update_monitor(
+        &self,
+        id: i64,
+        m: NewMonitor,
+    ) -> Result<Option<Monitor>, sqlx::Error> {
+        let config_str = m.config.to_string();
+        let rows = sqlx::query(
+            "UPDATE monitors
+             SET name = ?1, type_id = ?2, config_json = ?3, interval_secs = ?4, enabled = ?5
+             WHERE id = ?6",
+        )
+        .bind(&m.name)
+        .bind(&m.type_id)
+        .bind(&config_str)
+        .bind(m.interval_secs)
+        .bind(m.enabled as i64)
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_monitor(id).await
+    }
+
+    pub async fn delete_monitor(&self, id: i64) -> Result<bool, sqlx::Error> {
+        let rows = sqlx::query("DELETE FROM monitors WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(rows > 0)
+    }
+
+    pub async fn get_status(&self, id: i64) -> Result<Option<MonitorStatus>, sqlx::Error> {
+        let monitor = match self.get_monitor(id).await? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        let row = sqlx::query(
+            "SELECT status, message, components_json, updated_at
+             FROM status_current WHERE monitor_id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(Some(build_status(monitor, row)))
+    }
+
+    pub async fn list_status(&self) -> Result<Vec<MonitorStatus>, sqlx::Error> {
+        let monitors = self.list_monitors().await?;
+        let mut out = Vec::with_capacity(monitors.len());
+        for monitor in monitors {
+            let row = sqlx::query(
+                "SELECT status, message, components_json, updated_at
+                 FROM status_current WHERE monitor_id = ?1",
+            )
+            .bind(monitor.id)
+            .fetch_optional(&self.pool)
+            .await?;
+            out.push(build_status(monitor, row));
+        }
+        Ok(out)
+    }
+}
+
+fn build_status(monitor: Monitor, row: Option<SqliteRow>) -> MonitorStatus {
+    match row {
+        None => MonitorStatus {
+            monitor,
+            status: None,
+            message: None,
+            components: Vec::new(),
+            updated_at: None,
+        },
+        Some(r) => {
+            let status_str: String = r.try_get("status").unwrap_or_default();
+            let status =
+                serde_json::from_value(Value::String(status_str)).unwrap_or(Status::Unknown);
+            let message: Option<String> = r.try_get("message").ok();
+            let components_str: String = r.try_get("components_json").unwrap_or_default();
+            let components: Vec<Component> =
+                serde_json::from_str(&components_str).unwrap_or_default();
+            let updated_at: Option<String> = r.try_get("updated_at").ok();
+            MonitorStatus {
+                monitor,
+                status: Some(status),
+                message,
+                components,
+                updated_at,
+            }
         }
     }
 }
@@ -213,5 +334,85 @@ mod tests {
         let m = s.create_monitor(sample()).await.unwrap();
         assert!(m.id > 0);
         assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn update_monitor_changes_fields() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let updated = s
+            .update_monitor(
+                m.id,
+                NewMonitor {
+                    name: "Plex (edited)".into(),
+                    type_id: "http".into(),
+                    config: serde_json::json!({ "url": "http://plex.lan:32400" }),
+                    interval_secs: 60,
+                    enabled: false,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.name, "Plex (edited)");
+        assert_eq!(updated.interval_secs, 60);
+        assert!(!updated.enabled);
+    }
+
+    #[tokio::test]
+    async fn update_missing_monitor_is_none() {
+        let s = store().await;
+        let res = s.update_monitor(999, sample()).await.unwrap();
+        assert!(res.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_monitor_removes_it() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        assert!(s.delete_monitor(m.id).await.unwrap());
+        assert!(s.get_monitor(m.id).await.unwrap().is_none());
+        assert!(!s.delete_monitor(m.id).await.unwrap());
+    }
+
+    use crate::report::CheckReport;
+
+    #[tokio::test]
+    async fn get_status_is_none_status_before_first_check() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let ms = s.get_status(m.id).await.unwrap().unwrap();
+        assert_eq!(ms.monitor.id, m.id);
+        assert!(ms.status.is_none());
+        assert!(ms.components.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_status_reflects_saved_report() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let mut report = CheckReport::new(crate::status::Status::Critical, "HTTP 503");
+        report.components.push(crate::report::Component::new(
+            "db",
+            crate::status::Status::Critical,
+            true,
+            "down",
+        ));
+        s.save_status(m.id, &report).await.unwrap();
+
+        let ms = s.get_status(m.id).await.unwrap().unwrap();
+        assert_eq!(ms.status, Some(crate::status::Status::Critical));
+        assert_eq!(ms.message.as_deref(), Some("HTTP 503"));
+        assert_eq!(ms.components.len(), 1);
+        assert!(ms.updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_status_returns_every_monitor() {
+        let s = store().await;
+        s.create_monitor(sample()).await.unwrap();
+        s.create_monitor(sample()).await.unwrap();
+        let all = s.list_status().await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 }
