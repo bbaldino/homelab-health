@@ -680,6 +680,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tracing",
  "wiremock",
 ]
 
