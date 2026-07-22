@@ -1,19 +1,26 @@
 use crate::report::CheckReport;
 use crate::status::Status;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
+#[derive(Debug, Deserialize)]
 pub struct NewMonitor {
     pub name: String,
     pub type_id: String,
     pub config: Value,
     pub interval_secs: i64,
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone)]
+fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Monitor {
     pub id: i64,
     pub name: String,
@@ -23,6 +30,7 @@ pub struct Monitor {
     pub enabled: bool,
 }
 
+#[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
 }
@@ -42,11 +50,13 @@ fn row_to_monitor(row: SqliteRow) -> Result<Monitor, sqlx::Error> {
 impl Store {
     pub async fn connect(url: &str) -> Result<Store, sqlx::Error> {
         // create_if_missing so a fresh file-backed DB is bootstrapped on first run;
-        // harmless for sqlite::memory:. max_connections(1) keeps an in-memory DB
-        // alive for the whole test.
+        // harmless for sqlite::memory:. In-memory DBs stay at 1 connection so tests
+        // that depend on single connection behaviour still work.
+        let is_memory = url.contains(":memory:") || url.contains("mode=memory");
+        let max_conns = if is_memory { 1 } else { 5 };
         let options = SqliteConnectOptions::from_str(url)?.create_if_missing(true);
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(max_conns)
             .connect_with(options)
             .await?;
         // raw_sql (not query) so BOTH CREATE TABLE statements run.
@@ -140,6 +150,42 @@ impl Store {
             None => Ok(None),
         }
     }
+
+    pub async fn update_monitor(
+        &self,
+        id: i64,
+        m: NewMonitor,
+    ) -> Result<Option<Monitor>, sqlx::Error> {
+        let config_str = m.config.to_string();
+        let rows = sqlx::query(
+            "UPDATE monitors
+             SET name = ?1, type_id = ?2, config_json = ?3, interval_secs = ?4, enabled = ?5
+             WHERE id = ?6",
+        )
+        .bind(&m.name)
+        .bind(&m.type_id)
+        .bind(&config_str)
+        .bind(m.interval_secs)
+        .bind(m.enabled as i64)
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_monitor(id).await
+    }
+
+    pub async fn delete_monitor(&self, id: i64) -> Result<bool, sqlx::Error> {
+        let rows = sqlx::query("DELETE FROM monitors WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(rows > 0)
+    }
 }
 
 #[cfg(test)]
@@ -213,5 +259,44 @@ mod tests {
         let m = s.create_monitor(sample()).await.unwrap();
         assert!(m.id > 0);
         assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn update_monitor_changes_fields() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let updated = s
+            .update_monitor(
+                m.id,
+                NewMonitor {
+                    name: "Plex (edited)".into(),
+                    type_id: "http".into(),
+                    config: serde_json::json!({ "url": "http://plex.lan:32400" }),
+                    interval_secs: 60,
+                    enabled: false,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.name, "Plex (edited)");
+        assert_eq!(updated.interval_secs, 60);
+        assert!(!updated.enabled);
+    }
+
+    #[tokio::test]
+    async fn update_missing_monitor_is_none() {
+        let s = store().await;
+        let res = s.update_monitor(999, sample()).await.unwrap();
+        assert!(res.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_monitor_removes_it() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        assert!(s.delete_monitor(m.id).await.unwrap());
+        assert!(s.get_monitor(m.id).await.unwrap().is_none());
+        assert!(!s.delete_monitor(m.id).await.unwrap());
     }
 }
