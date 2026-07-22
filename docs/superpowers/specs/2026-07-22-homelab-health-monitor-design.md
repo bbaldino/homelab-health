@@ -207,6 +207,35 @@ Two distinct things, kept separate:
 - **Notifiers:** behind the trait, exercised with test doubles so tests never
   actually page anyone.
 
+## Plan 2 design decisions (added 2026-07-22, after Plan 1 merged)
+
+Decisions made when scoping the runtime, refining the sections above:
+
+- **Monitors are API-only.** Created/edited/deleted solely via the REST API
+  (and later the web UI). The SQLite file is internal app state — never
+  hand-edited by a user. No declarative monitor config file. This keeps the
+  DB the single source of truth and avoids file-vs-DB reconciliation.
+- **Config split by need-before-app:** only the bootstrap essentials come from
+  **environment variables** — the bind interface/port and the DB path — with
+  sensible defaults so bare `cargo run` works. Everything else, **including
+  notifier configuration** (HA URL/token, ntfy server/topic), is stored in the
+  DB and configured via REST/UI like any other app setting. No secrets in env.
+- **Debounce default:** a state change commits after **2 consecutive** matching
+  results. Per-monitor override is added alongside notifiers (Plan 2b), since
+  that is when it starts to matter.
+- **The runtime ships in two plans:**
+  - **Plan 2a — Runnable daemon:** scheduler + debounce, the axum JSON API
+    (`/api/v1/status`, monitors CRUD, `/check-types`, `/monitors/:id/run`),
+    `main` wiring into a single binary, env config, and a `seed.sh` curl
+    convenience for bootstrapping live tests. Runs the existing
+    `http`/`tcp`/`frigate` checks. Deliverable: a curl-able daemon for live
+    testing against real services.
+  - **Plan 2b — Alerting & more checks:** notifier settings-in-DB + REST config
+    + per-monitor selection (which notifiers, min severity); HA + ntfy
+    notifiers; and the `cert-expiry`, `ping`, and `json-health` check types.
+- **Deployment (later, not Plan 2):** a Dockerfile and a GitHub Action to build
+  and push an image to ghcr. Running locally for now.
+
 ## Deferred / future
 
 - Additional plugins: Music Assistant / Spotify, Unraid array & SMART, Plex,
