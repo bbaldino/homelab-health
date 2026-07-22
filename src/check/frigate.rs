@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FrigateConfig {
     base_url: String,
     #[serde(default = "default_min_fps")]
@@ -26,6 +27,7 @@ struct CameraStats {
     process_fps: f64,
 }
 
+// NOTE: no deny_unknown_fields here — Frigate's /api/stats carries many fields we don't model.
 #[derive(Deserialize)]
 struct Stats {
     cameras: HashMap<String, CameraStats>,

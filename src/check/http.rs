@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HttpConfig {
     url: String,
     #[serde(default = "default_status")]
@@ -133,6 +134,14 @@ mod tests {
     async fn unknown_when_unreachable() {
         // Port 1 is not listening; connection fails fast.
         let cfg = json!({ "url": "http://127.0.0.1:1/", "timeout_secs": 1 });
+        let report = HttpCheck.run(&cfg).await;
+        assert_eq!(report.status, Status::Unknown);
+    }
+
+    #[tokio::test]
+    async fn unknown_config_field_is_unknown() {
+        // A typo'd/unexpected field must fail deserialization, not run with a default.
+        let cfg = json!({ "url": "http://127.0.0.1:1/", "timeout_sec": 5 });
         let report = HttpCheck.run(&cfg).await;
         assert_eq!(report.status, Status::Unknown);
     }

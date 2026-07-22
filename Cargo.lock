@@ -679,7 +679,6 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
- "thiserror",
  "tokio",
  "wiremock",
 ]

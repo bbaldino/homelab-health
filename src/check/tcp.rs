@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TcpConfig {
     host: String,
     port: u16,
