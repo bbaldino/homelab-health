@@ -337,6 +337,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_is_idempotent_on_existing_file() {
+        // Reconnecting to a file whose tables already exist (e.g. restarting the
+        // daemon) must not fail — the migration is guarded with IF NOT EXISTS.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health.db");
+        let url = format!("sqlite://{}", path.display());
+        let s1 = Store::connect(&url).await.unwrap();
+        s1.create_monitor(sample()).await.unwrap();
+        drop(s1);
+        // Second connect against the now-populated file must succeed and see the row.
+        let s2 = Store::connect(&url).await.unwrap();
+        assert_eq!(s2.list_monitors().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn update_monitor_changes_fields() {
         let s = store().await;
         let m = s.create_monitor(sample()).await.unwrap();

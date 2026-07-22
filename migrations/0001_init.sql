@@ -1,4 +1,4 @@
-CREATE TABLE monitors (
+CREATE TABLE IF NOT EXISTS monitors (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT    NOT NULL,
     type_id       TEXT    NOT NULL,
@@ -7,7 +7,7 @@ CREATE TABLE monitors (
     enabled       INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE TABLE status_current (
+CREATE TABLE IF NOT EXISTS status_current (
     monitor_id      INTEGER PRIMARY KEY REFERENCES monitors(id) ON DELETE CASCADE,
     status          TEXT    NOT NULL,
     message         TEXT    NOT NULL,
