@@ -149,7 +149,7 @@ mod tests {
             .await
             .unwrap();
         let arr = body.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.len(), 4);
     }
 
     #[tokio::test]
