@@ -75,6 +75,7 @@ impl Registry {
 }
 
 pub mod http;
+pub mod tcp;
 
 #[cfg(test)]
 mod tests {
