@@ -80,6 +80,7 @@ impl Registry {
         reg.register(Arc::new(crate::check::tcp::TcpCheck));
         reg.register(Arc::new(crate::check::frigate::FrigateCameraCheck));
         reg.register(Arc::new(crate::check::json_health::JsonHealthCheck));
+        reg.register(Arc::new(crate::check::music_assistant::MusicAssistantCheck));
         reg
     }
 }
@@ -87,6 +88,7 @@ impl Registry {
 pub mod frigate;
 pub mod http;
 pub mod json_health;
+pub mod music_assistant;
 pub mod tcp;
 
 #[cfg(test)]
@@ -125,12 +127,13 @@ mod tests {
     }
 
     #[test]
-    fn with_builtins_registers_all_three() {
+    fn with_builtins_registers_all() {
         let reg = Registry::with_builtins();
         assert!(reg.get("http").is_some());
         assert!(reg.get("tcp").is_some());
         assert!(reg.get("frigate-camera").is_some());
         assert!(reg.get("json-health").is_some());
-        assert_eq!(reg.schemas().len(), 4);
+        assert!(reg.get("music-assistant").is_some());
+        assert_eq!(reg.schemas().len(), 5);
     }
 }
