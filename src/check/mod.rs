@@ -74,6 +74,7 @@ impl Registry {
     }
 }
 
+pub mod frigate;
 pub mod http;
 pub mod tcp;
 
