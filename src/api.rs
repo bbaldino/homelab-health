@@ -1,8 +1,8 @@
 use crate::check::{ConfigSchema, Registry};
-use crate::store::{Monitor, NewMonitor, Store};
+use crate::store::{Monitor, MonitorStatus, NewMonitor, Store};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -26,6 +26,9 @@ pub fn build_app(state: ApiState) -> Router {
             "/api/v1/monitors/{id}",
             axum::routing::put(update_monitor).delete(delete_monitor),
         )
+        .route("/api/v1/status", get(list_status))
+        .route("/api/v1/status/{id}", get(get_status))
+        .route("/api/v1/monitors/{id}/run", post(run_now))
         .with_state(state)
 }
 
@@ -79,6 +82,40 @@ async fn delete_monitor(
     } else {
         Err(StatusCode::NOT_FOUND)
     }
+}
+
+async fn list_status(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<MonitorStatus>>, StatusCode> {
+    let all = state.store.list_status().await.map_err(internal)?;
+    Ok(Json(all))
+}
+
+async fn get_status(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> Result<Json<MonitorStatus>, StatusCode> {
+    match state.store.get_status(id).await.map_err(internal)? {
+        Some(ms) => Ok(Json(ms)),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn run_now(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> Result<Json<crate::report::CheckReport>, StatusCode> {
+    let monitor = match state.store.get_monitor(id).await.map_err(internal)? {
+        Some(m) => m,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let report = state.registry.run(&monitor.type_id, &monitor.config).await;
+    state
+        .store
+        .save_status(id, &report)
+        .await
+        .map_err(internal)?;
+    Ok(Json(report))
 }
 
 #[cfg(test)]
@@ -183,6 +220,81 @@ mod tests {
                 "name": "x", "type_id": "http",
                 "config": { "url": "http://x" }, "interval_secs": 30
             }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn status_lists_monitors_unknown_before_check() {
+        let (base, store) = spawn().await;
+        store
+            .create_monitor(NewMonitor {
+                name: "m".into(),
+                type_id: "http".into(),
+                config: json!({ "url": "http://x" }),
+                interval_secs: 30,
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let body: Value = reqwest::get(format!("{base}/api/v1/status"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        // status is null until first check
+        assert!(arr[0]["status"].is_null());
+        assert_eq!(arr[0]["name"], "m");
+    }
+
+    #[tokio::test]
+    async fn run_now_executes_and_persists() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+
+        let (base, store) = spawn().await;
+        let m = store
+            .create_monitor(NewMonitor {
+                name: "m".into(),
+                type_id: "http".into(),
+                config: json!({ "url": mock.uri() }),
+                interval_secs: 30,
+                enabled: true,
+            })
+            .await
+            .unwrap();
+
+        let report: Value = reqwest::Client::new()
+            .post(format!("{base}/api/v1/monitors/{}/run", m.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(report["status"], "ok");
+
+        // persisted
+        let got = store.get_status(m.id).await.unwrap().unwrap();
+        assert_eq!(got.status, Some(crate::status::Status::Ok));
+    }
+
+    #[tokio::test]
+    async fn run_now_missing_monitor_404() {
+        let (base, _store) = spawn().await;
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/monitors/999/run"))
             .send()
             .await
             .unwrap();
