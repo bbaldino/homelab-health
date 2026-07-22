@@ -1,8 +1,9 @@
 use crate::report::CheckReport;
 use crate::status::Status;
 use serde_json::Value;
-use sqlx::sqlite::{SqlitePoolOptions, SqliteRow};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
+use std::str::FromStr;
 
 pub struct NewMonitor {
     pub name: String,
@@ -26,27 +27,29 @@ pub struct Store {
     pool: SqlitePool,
 }
 
-fn row_to_monitor(row: SqliteRow) -> Monitor {
-    let config_str: String = row.get("config_json");
-    Monitor {
-        id: row.get("id"),
-        name: row.get("name"),
-        type_id: row.get("type_id"),
+fn row_to_monitor(row: SqliteRow) -> Result<Monitor, sqlx::Error> {
+    let config_str: String = row.try_get("config_json")?;
+    Ok(Monitor {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        type_id: row.try_get("type_id")?,
         config: serde_json::from_str(&config_str).unwrap_or(Value::Null),
-        interval_secs: row.get("interval_secs"),
-        enabled: row.get::<i64, _>("enabled") != 0,
-    }
+        interval_secs: row.try_get("interval_secs")?,
+        enabled: row.try_get::<i64, _>("enabled")? != 0,
+    })
 }
 
 impl Store {
     pub async fn connect(url: &str) -> Result<Store, sqlx::Error> {
-        // max_connections(1) keeps `sqlite::memory:` alive for the whole test.
+        // create_if_missing so a fresh file-backed DB is bootstrapped on first run;
+        // harmless for sqlite::memory:. max_connections(1) keeps an in-memory DB
+        // alive for the whole test.
+        let options = SqliteConnectOptions::from_str(url)?.create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect(url)
+            .connect_with(options)
             .await?;
-        // raw_sql (not query) so BOTH CREATE TABLE statements run — a prepared
-        // query only executes the first statement.
+        // raw_sql (not query) so BOTH CREATE TABLE statements run.
         sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
             .execute(&pool)
             .await?;
@@ -66,7 +69,7 @@ impl Store {
         .bind(m.enabled as i64)
         .fetch_one(&self.pool)
         .await?
-        .get("id");
+        .try_get("id")?;
 
         Ok(Monitor {
             id,
@@ -82,7 +85,7 @@ impl Store {
         let rows = sqlx::query("SELECT * FROM monitors ORDER BY id")
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.into_iter().map(row_to_monitor).collect())
+        rows.into_iter().map(row_to_monitor).collect()
     }
 
     pub async fn get_monitor(&self, id: i64) -> Result<Option<Monitor>, sqlx::Error> {
@@ -90,7 +93,7 @@ impl Store {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.map(row_to_monitor))
+        row.map(row_to_monitor).transpose()
     }
 
     pub async fn save_status(
@@ -128,8 +131,8 @@ impl Store {
             .await?;
         match row {
             Some(r) => {
-                let status_str: String = r.get("status");
-                let message: String = r.get("message");
+                let status_str: String = r.try_get("status")?;
+                let message: String = r.try_get("message")?;
                 let status: Status =
                     serde_json::from_value(Value::String(status_str)).unwrap_or(Status::Unknown);
                 Ok(Some((status, message)))
@@ -198,5 +201,17 @@ mod tests {
             .unwrap();
         let (status, _) = s.get_current(m.id).await.unwrap().unwrap();
         assert_eq!(status, Status::Degraded);
+    }
+
+    #[tokio::test]
+    async fn connects_and_creates_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health.db");
+        let url = format!("sqlite://{}", path.display());
+        // File does not exist yet; connect must create it.
+        let s = Store::connect(&url).await.unwrap();
+        let m = s.create_monitor(sample()).await.unwrap();
+        assert!(m.id > 0);
+        assert!(path.exists());
     }
 }
