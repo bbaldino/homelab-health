@@ -79,12 +79,14 @@ impl Registry {
         reg.register(Arc::new(crate::check::http::HttpCheck));
         reg.register(Arc::new(crate::check::tcp::TcpCheck));
         reg.register(Arc::new(crate::check::frigate::FrigateCameraCheck));
+        reg.register(Arc::new(crate::check::json_health::JsonHealthCheck));
         reg
     }
 }
 
 pub mod frigate;
 pub mod http;
+pub mod json_health;
 pub mod tcp;
 
 #[cfg(test)]
@@ -128,6 +130,7 @@ mod tests {
         assert!(reg.get("http").is_some());
         assert!(reg.get("tcp").is_some());
         assert!(reg.get("frigate-camera").is_some());
-        assert_eq!(reg.schemas().len(), 3);
+        assert!(reg.get("json-health").is_some());
+        assert_eq!(reg.schemas().len(), 4);
     }
 }

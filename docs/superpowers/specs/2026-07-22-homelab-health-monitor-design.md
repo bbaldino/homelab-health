@@ -233,6 +233,14 @@ Decisions made when scoping the runtime, refining the sections above:
   - **Plan 2b — Alerting & more checks:** notifier settings-in-DB + REST config
     + per-monitor selection (which notifiers, min severity); HA + ntfy
     notifiers; and the `cert-expiry`, `ping`, and `json-health` check types.
+    - **`json-health` decisions (2026-07-22):** config is a single `url` field
+      (full health-endpoint URL); parse the body regardless of HTTP status code
+      (a `503`-on-critical service still has a readable body); components (when
+      present) roll up via the existing `CheckReport::from_components`, top-level
+      `status` used only when no components; a service status outside
+      `ok`/`degraded`/`critical` (incl. `unknown`) → check `Unknown`; lenient on
+      extra fields in the response body (only the config struct denies unknown
+      fields). Built ahead of the rest of 2b, on its own branch.
 - **Deployment (later, not Plan 2):** a Dockerfile and a GitHub Action to build
   and push an image to ghcr. Running locally for now.
 
