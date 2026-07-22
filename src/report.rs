@@ -17,11 +17,17 @@ impl Component {
         critical: bool,
         message: impl Into<String>,
     ) -> Self {
+        let name = name.into();
+        let message = message.into();
+        debug_assert!(
+            status == Status::Ok || !message.is_empty(),
+            "component '{name}' has non-Ok status {status:?} but empty message"
+        );
         Component {
-            name: name.into(),
+            name,
             status,
             critical,
-            message: message.into(),
+            message,
         }
     }
 }
@@ -150,5 +156,25 @@ mod tests {
         let report = CheckReport::from_components(vec![c("cam", Status::Critical, true)]);
         assert_eq!(report.status, Status::Critical);
         assert_eq!(report.components.len(), 1);
+    }
+
+    #[test]
+    fn degraded_component_rolls_up_to_degraded() {
+        // Exercises the (Degraded, _) branch of effective() for both criticalities.
+        let (crit, _) = rollup(&[c("a", Status::Degraded, true)]);
+        assert_eq!(crit, Status::Degraded);
+        let (noncrit, _) = rollup(&[c("b", Status::Degraded, false)]);
+        assert_eq!(noncrit, Status::Degraded);
+    }
+
+    #[test]
+    fn multi_driver_tie_names_all_drivers() {
+        let (status, msg) = rollup(&[
+            c("driveway", Status::Critical, true),
+            c("garage", Status::Critical, true),
+        ]);
+        assert_eq!(status, Status::Critical);
+        assert!(msg.contains("driveway"));
+        assert!(msg.contains("garage"));
     }
 }
