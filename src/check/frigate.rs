@@ -67,10 +67,13 @@ impl CheckType for FrigateCameraCheck {
         };
 
         let url = format!("{}/api/stats", cfg.base_url.trim_end_matches('/'));
-        let client = reqwest::Client::builder()
+        let client = match reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
-            .expect("client builds");
+        {
+            Ok(c) => c,
+            Err(e) => return CheckReport::new(Status::Unknown, format!("client error: {e}")),
+        };
 
         let stats: Stats = match client.get(&url).send().await {
             Ok(resp) => match resp.json().await {
@@ -174,6 +177,13 @@ mod tests {
     async fn unreachable_is_unknown() {
         let cfg = json!({ "base_url": "http://127.0.0.1:1" });
         let report = FrigateCameraCheck.run(&cfg).await;
+        assert_eq!(report.status, Status::Unknown);
+    }
+
+    #[test]
+    fn empty_cameras_is_unknown() {
+        let stats: Stats = serde_json::from_value(json!({ "cameras": {} })).unwrap();
+        let report = FrigateCameraCheck::evaluate(&stats, 0.1);
         assert_eq!(report.status, Status::Unknown);
     }
 }
