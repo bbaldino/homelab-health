@@ -20,7 +20,7 @@ fn default_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Monitor {
     pub id: i64,
     pub name: String,
