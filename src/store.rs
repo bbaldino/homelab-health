@@ -1,4 +1,4 @@
-use crate::report::CheckReport;
+use crate::report::{CheckReport, Component};
 use crate::status::Status;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +28,16 @@ pub struct Monitor {
     pub config: Value,
     pub interval_secs: i64,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MonitorStatus {
+    #[serde(flatten)]
+    pub monitor: Monitor,
+    pub status: Option<Status>,
+    pub message: Option<String>,
+    pub components: Vec<Component>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Clone)]
@@ -186,6 +196,66 @@ impl Store {
             .rows_affected();
         Ok(rows > 0)
     }
+
+    pub async fn get_status(&self, id: i64) -> Result<Option<MonitorStatus>, sqlx::Error> {
+        let monitor = match self.get_monitor(id).await? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        let row = sqlx::query(
+            "SELECT status, message, components_json, updated_at
+             FROM status_current WHERE monitor_id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(Some(build_status(monitor, row)))
+    }
+
+    pub async fn list_status(&self) -> Result<Vec<MonitorStatus>, sqlx::Error> {
+        let monitors = self.list_monitors().await?;
+        let mut out = Vec::with_capacity(monitors.len());
+        for monitor in monitors {
+            let row = sqlx::query(
+                "SELECT status, message, components_json, updated_at
+                 FROM status_current WHERE monitor_id = ?1",
+            )
+            .bind(monitor.id)
+            .fetch_optional(&self.pool)
+            .await?;
+            out.push(build_status(monitor, row));
+        }
+        Ok(out)
+    }
+}
+
+fn build_status(monitor: Monitor, row: Option<SqliteRow>) -> MonitorStatus {
+    match row {
+        None => MonitorStatus {
+            monitor,
+            status: None,
+            message: None,
+            components: Vec::new(),
+            updated_at: None,
+        },
+        Some(r) => {
+            let status_str: String = r.try_get("status").unwrap_or_default();
+            let status =
+                serde_json::from_value(Value::String(status_str)).unwrap_or(Status::Unknown);
+            let message: Option<String> = r.try_get("message").ok();
+            let components_str: String = r.try_get("components_json").unwrap_or_default();
+            let components: Vec<Component> =
+                serde_json::from_str(&components_str).unwrap_or_default();
+            let updated_at: Option<String> = r.try_get("updated_at").ok();
+            MonitorStatus {
+                monitor,
+                status: Some(status),
+                message,
+                components,
+                updated_at,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -298,5 +368,46 @@ mod tests {
         assert!(s.delete_monitor(m.id).await.unwrap());
         assert!(s.get_monitor(m.id).await.unwrap().is_none());
         assert!(!s.delete_monitor(m.id).await.unwrap());
+    }
+
+    use crate::report::CheckReport;
+
+    #[tokio::test]
+    async fn get_status_is_none_status_before_first_check() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let ms = s.get_status(m.id).await.unwrap().unwrap();
+        assert_eq!(ms.monitor.id, m.id);
+        assert!(ms.status.is_none());
+        assert!(ms.components.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_status_reflects_saved_report() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let mut report = CheckReport::new(crate::status::Status::Critical, "HTTP 503");
+        report.components.push(crate::report::Component::new(
+            "db",
+            crate::status::Status::Critical,
+            true,
+            "down",
+        ));
+        s.save_status(m.id, &report).await.unwrap();
+
+        let ms = s.get_status(m.id).await.unwrap().unwrap();
+        assert_eq!(ms.status, Some(crate::status::Status::Critical));
+        assert_eq!(ms.message.as_deref(), Some("HTTP 503"));
+        assert_eq!(ms.components.len(), 1);
+        assert!(ms.updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_status_returns_every_monitor() {
+        let s = store().await;
+        s.create_monitor(sample()).await.unwrap();
+        s.create_monitor(sample()).await.unwrap();
+        let all = s.list_status().await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 }
