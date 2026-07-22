@@ -1,0 +1,17 @@
+# Keep the build context small — only src/, migrations/, and Cargo manifests
+# are needed to compile.
+/target
+.git
+.github
+docs
+.superpowers
+node_modules
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+seed.sh
+README.md
+Dockerfile
+.dockerignore
