@@ -8,8 +8,10 @@ async-trait = "0.1.91"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
+tempfile = "3.27.0"
 wiremock = "0.6.5"
