@@ -68,7 +68,7 @@ impl Scheduler {
             store,
             registry,
             threshold,
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(10),
             debouncers: HashMap::new(),
         }
     }

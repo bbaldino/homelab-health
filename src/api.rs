@@ -109,6 +109,8 @@ async fn run_now(
         Some(m) => m,
         None => return Err(StatusCode::NOT_FOUND),
     };
+    // Run-now persists immediately and intentionally bypasses the scheduler's
+    // debounce, so a one-off /run result may momentarily differ from scheduled state.
     let report = state.registry.run(&monitor.type_id, &monitor.config).await;
     state
         .store

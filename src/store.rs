@@ -64,7 +64,12 @@ impl Store {
         // that depend on single connection behaviour still work.
         let is_memory = url.contains(":memory:") || url.contains("mode=memory");
         let max_conns = if is_memory { 1 } else { 5 };
-        let options = SqliteConnectOptions::from_str(url)?.create_if_missing(true);
+        let mut options = SqliteConnectOptions::from_str(url)?.create_if_missing(true);
+        if !is_memory {
+            options = options
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .busy_timeout(std::time::Duration::from_secs(5));
+        }
         let pool = SqlitePoolOptions::new()
             .max_connections(max_conns)
             .connect_with(options)
@@ -121,8 +126,8 @@ impl Store {
         monitor_id: i64,
         report: &CheckReport,
     ) -> Result<(), sqlx::Error> {
-        let status = serde_json::to_string(&report.status).unwrap();
-        let components = serde_json::to_string(&report.components).unwrap();
+        let status = serde_json::to_string(&report.status).unwrap_or_default();
+        let components = serde_json::to_string(&report.components).unwrap_or_default();
         sqlx::query(
             "INSERT INTO status_current (monitor_id, status, message, components_json, updated_at)
              VALUES (?1, ?2, ?3, ?4, datetime('now'))
