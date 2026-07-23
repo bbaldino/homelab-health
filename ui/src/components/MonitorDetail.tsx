@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../api";
-import type { Sample, Uptime } from "../types";
+import type { Sample, Status, Uptime } from "../types";
 
 const HISTORY_LIMIT = 100;
 
@@ -76,9 +76,7 @@ export function MonitorDetail({ monitorId }: MonitorDetailProps) {
     <div class="monitor-detail">
       <section class="uptime-section">
         <div class="uptime-header">
-          <span class="uptime-label">
-            {uptime ? `${uptime.percent_ok.toFixed(1)}% uptime` : "Uptime"}
-          </span>
+          <span class="uptime-label">{uptime ? uptimeLabel(uptime) : "Uptime"}</span>
           <div class="window-toggle" role="group" aria-label="Uptime window">
             {WINDOWS.map((w) => (
               <button
@@ -98,7 +96,7 @@ export function MonitorDetail({ monitorId }: MonitorDetailProps) {
         {!uptimeError && uptimeLoading && (
           <div class="detail-loading">Loading uptime…</div>
         )}
-        {!uptimeError && !uptimeLoading && uptime && <UptimeBar uptime={uptime} />}
+        {!uptimeError && !uptimeLoading && uptime && <UptimeBuckets uptime={uptime} />}
       </section>
 
       <section class="history-section">
@@ -133,25 +131,72 @@ export function MonitorDetail({ monitorId }: MonitorDetailProps) {
   );
 }
 
-function UptimeBar({ uptime }: { uptime: Uptime }) {
+/** Number of discrete buckets to render for a given uptime window. */
+function bucketCountFor(windowSecs: number): number {
+  return windowSecs >= 604800 ? 84 : 48;
+}
+
+/** Worst-status ranking used to pick a bucket's color (higher wins). */
+const STATUS_RANK: Record<Status, number> = {
+  unknown: 0,
+  ok: 1,
+  degraded: 2,
+  critical: 3,
+};
+
+function uptimeLabel(uptime: Uptime): string {
+  const observed = uptime.ok_secs + uptime.degraded_secs + uptime.critical_secs;
+  if (observed <= 0) return "no data yet";
+  return `${uptime.percent_ok.toFixed(1)}% uptime`;
+}
+
+interface Bucket {
+  start: number;
+  end: number;
+  status: Status | null;
+}
+
+function buildBuckets(uptime: Uptime): Bucket[] {
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const segments = uptime.segments;
+  const rangeStart = segments[0]?.start ?? nowSecs - uptime.window_secs;
+  const rangeEnd = segments[segments.length - 1]?.end ?? nowSecs;
+  const n = bucketCountFor(uptime.window_secs);
+  const bucketSize = (rangeEnd - rangeStart) / n;
+
+  const buckets: Bucket[] = [];
+  for (let i = 0; i < n; i++) {
+    const bStart = rangeStart + i * bucketSize;
+    const bEnd = rangeStart + (i + 1) * bucketSize;
+    let worst: Status | null = null;
+    for (const seg of segments) {
+      if (seg.start < bEnd && seg.end > bStart) {
+        if (worst === null || STATUS_RANK[seg.status] > STATUS_RANK[worst]) {
+          worst = seg.status;
+        }
+      }
+    }
+    buckets.push({ start: bStart, end: bEnd, status: worst });
+  }
+  return buckets;
+}
+
+function UptimeBuckets({ uptime }: { uptime: Uptime }) {
   if (uptime.segments.length === 0) {
     return <div class="detail-empty">No data in this window.</div>;
   }
+  const buckets = buildBuckets(uptime);
   return (
-    <div class="uptime-bar">
-      {uptime.segments.map((seg, i) => {
-        const widthPct = Math.max(
-          0,
-          ((seg.end - seg.start) / uptime.window_secs) * 100,
-        );
-        const start = new Date(seg.start * 1000).toLocaleString();
-        const end = new Date(seg.end * 1000).toLocaleString();
+    <div class="uptime-bucket-row">
+      {buckets.map((b, i) => {
+        const status = b.status ?? "unknown";
+        const start = new Date(b.start * 1000).toLocaleString();
+        const end = new Date(b.end * 1000).toLocaleString();
         return (
           <span
             key={i}
-            class={`uptime-segment uptime-segment-${seg.status}`}
-            style={{ width: `${widthPct}%` }}
-            title={`${seg.status} · ${start} – ${end}`}
+            class={`uptime-bucket uptime-bucket-${status}`}
+            title={`${start} – ${end} · ${status}`}
           />
         );
       })}
