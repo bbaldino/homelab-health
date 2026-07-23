@@ -15,9 +15,12 @@ function rankOf(status: Status | null): number {
 
 interface StatusBoardProps {
   monitors: MonitorStatus[];
+  onEdit: (monitor: MonitorStatus) => void;
+  onDelete: (monitor: MonitorStatus) => void;
+  onRunNow: (monitor: MonitorStatus) => Promise<void>;
 }
 
-export function StatusBoard({ monitors }: StatusBoardProps) {
+export function StatusBoard({ monitors, onEdit, onDelete, onRunNow }: StatusBoardProps) {
   const sorted = [...monitors].sort((a, b) => rankOf(a.status) - rankOf(b.status));
 
   if (sorted.length === 0) {
@@ -27,7 +30,13 @@ export function StatusBoard({ monitors }: StatusBoardProps) {
   return (
     <div class="status-board">
       {sorted.map((monitor) => (
-        <MonitorCard key={monitor.id} monitor={monitor} />
+        <MonitorCard
+          key={monitor.id}
+          monitor={monitor}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          onRunNow={onRunNow}
+        />
       ))}
     </div>
   );

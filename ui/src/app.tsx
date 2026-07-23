@@ -1,7 +1,9 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "./api";
-import type { MonitorStatus, Status } from "./types";
+import type { MonitorStatus, NewMonitor, Status } from "./types";
 import { StatusBoard } from "./components/StatusBoard";
+import { Modal } from "./components/Modal";
+import { MonitorForm } from "./components/MonitorForm";
 
 const POLL_INTERVAL_MS = 10_000;
 
@@ -11,6 +13,8 @@ interface Counts {
   critical: number;
   unknown: number;
 }
+
+type ModalState = { mode: "add" } | { mode: "edit"; monitor: MonitorStatus };
 
 function countByStatus(monitors: MonitorStatus[]): Counts {
   const counts: Counts = { ok: 0, degraded: 0, critical: 0, unknown: 0 };
@@ -26,6 +30,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
+  const [modalState, setModalState] = useState<ModalState | null>(null);
 
   async function refresh() {
     try {
@@ -46,6 +51,30 @@ export function App() {
     return () => clearInterval(id);
   }, []);
 
+  async function handleFormSubmit(payload: NewMonitor) {
+    if (modalState?.mode === "edit") {
+      await api.updateMonitor(modalState.monitor.id, payload);
+    } else {
+      await api.createMonitor(payload);
+    }
+    await refresh();
+    setModalState(null);
+  }
+
+  async function handleDelete(monitor: MonitorStatus) {
+    try {
+      await api.deleteMonitor(monitor.id);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleRunNow(monitor: MonitorStatus) {
+    await api.runNow(monitor.id);
+    await refresh();
+  }
+
   const counts = countByStatus(monitors);
 
   return (
@@ -53,9 +82,18 @@ export function App() {
       <header class="app-header">
         <div class="app-header-top">
           <h1>Homelab Health</h1>
-          <span class="refresh-hint" title="Status is polled automatically">
-            auto-refreshing every 10s
-          </span>
+          <div class="app-header-actions">
+            <span class="refresh-hint" title="Status is polled automatically">
+              auto-refreshing every 10s
+            </span>
+            <button
+              type="button"
+              class="btn btn-primary"
+              onClick={() => setModalState({ mode: "add" })}
+            >
+              + Add monitor
+            </button>
+          </div>
         </div>
         <div class="summary">
           <span class="summary-item summary-ok">
@@ -88,8 +126,27 @@ export function App() {
             No monitors configured yet.
           </div>
         )}
-        <StatusBoard monitors={monitors} />
+        <StatusBoard
+          monitors={monitors}
+          onEdit={(monitor) => setModalState({ mode: "edit", monitor })}
+          onDelete={handleDelete}
+          onRunNow={handleRunNow}
+        />
       </main>
+
+      {modalState && (
+        <Modal
+          title={modalState.mode === "add" ? "Add monitor" : `Edit ${modalState.monitor.name}`}
+          onClose={() => setModalState(null)}
+        >
+          <MonitorForm
+            mode={modalState.mode}
+            monitor={modalState.mode === "edit" ? modalState.monitor : undefined}
+            onSubmit={handleFormSubmit}
+            onCancel={() => setModalState(null)}
+          />
+        </Modal>
+      )}
     </div>
   );
 }
