@@ -82,6 +82,7 @@ impl Registry {
         reg.register(Arc::new(crate::check::frigate::FrigateCameraCheck));
         reg.register(Arc::new(crate::check::json_health::JsonHealthCheck));
         reg.register(Arc::new(crate::check::music_assistant::MusicAssistantCheck));
+        reg.register(Arc::new(crate::check::unraid::UnraidCheck));
         reg
     }
 }
@@ -91,6 +92,7 @@ pub mod http;
 pub mod json_health;
 pub mod music_assistant;
 pub mod tcp;
+pub mod unraid;
 
 #[cfg(test)]
 mod tests {
@@ -135,7 +137,8 @@ mod tests {
         assert!(reg.get("frigate-camera").is_some());
         assert!(reg.get("json-health").is_some());
         assert!(reg.get("music-assistant").is_some());
-        assert_eq!(reg.schemas().len(), 5);
+        assert!(reg.get("unraid").is_some());
+        assert_eq!(reg.schemas().len(), 6);
     }
 
     #[test]

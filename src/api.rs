@@ -221,7 +221,7 @@ mod tests {
             .await
             .unwrap();
         let arr = body.as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        assert_eq!(arr.len(), 6);
     }
 
     #[tokio::test]
