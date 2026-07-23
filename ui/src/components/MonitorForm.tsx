@@ -115,7 +115,9 @@ export function MonitorForm({ mode, monitor, onSubmit, onCancel }: MonitorFormPr
     const config: Record<string, unknown> = {};
     for (const field of fields) {
       const coerced = coerceFieldValue(field, configValues[field.name]);
-      config[field.name] = coerced;
+      if (coerced !== null) {
+        config[field.name] = coerced;
+      }
       if (field.required && (coerced === null || coerced === "")) {
         missing.push(humanize(field.name));
       }

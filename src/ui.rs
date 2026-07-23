@@ -12,6 +12,9 @@ const FALLBACK_HTML: &str = "<!doctype html><title>homelab-health</title><h1>hom
 /// and to a minimal inline page when the UI has not been built.
 pub async fn serve_asset(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
+    if path.starts_with("api/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if let Some(content) = Assets::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         return ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response();
@@ -33,5 +36,11 @@ mod tests {
         // built, we still return a 200 HTML page (never a 500/panic).
         let resp = serve_asset("/".parse().unwrap()).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unmatched_api_path_returns_404() {
+        let resp = serve_asset("/api/v1/nope".parse().unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
