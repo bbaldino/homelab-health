@@ -15,3 +15,6 @@ ui/tsconfig.tsbuildinfo
 # already existing elements were commented out
 
 #/target
+
+# Playwright test/screenshot artifacts (dev verification only)
+.playwright-mcp/
