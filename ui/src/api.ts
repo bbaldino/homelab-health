@@ -4,6 +4,8 @@ import type {
   Monitor,
   MonitorStatus,
   NewMonitor,
+  Sample,
+  Uptime,
 } from "./types";
 
 /** Thrown when the backend responds with a non-2xx status. */
@@ -65,6 +67,15 @@ export class ApiClient {
 
   runNow(id: number): Promise<CheckReport> {
     return request<CheckReport>(`/monitors/${id}/run`, { method: "POST" });
+  }
+
+  getHistory(id: number, limit?: number): Promise<Sample[]> {
+    const query = limit !== undefined ? `?limit=${limit}` : "";
+    return request<Sample[]>(`/monitors/${id}/history${query}`);
+  }
+
+  getUptime(id: number, windowSecs: number): Promise<Uptime> {
+    return request<Uptime>(`/monitors/${id}/uptime?window=${windowSecs}`);
   }
 }
 

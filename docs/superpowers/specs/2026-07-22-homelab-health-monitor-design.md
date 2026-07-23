@@ -244,6 +244,26 @@ Decisions made when scoping the runtime, refining the sections above:
 - **Deployment (later, not Plan 2):** a Dockerfile and a GitHub Action to build
   and push an image to ghcr. Running locally for now.
 
+## History / timeline (Plan 4, decided 2026-07-22)
+
+Two layers, recorded differently because they need different data:
+
+- **Uptime timeline** ← committed **transitions** only (debounced, same as would
+  alert), so transient blips don't pollute uptime. Small `status_transitions`
+  table, kept indefinitely. Drives the red/green timeline bar + % uptime over
+  24h/7d/30d.
+- **Forensics** ← raw **per-check samples** (status + components + messages,
+  every run — including the near-misses the debounce hides). `check_samples`
+  table, pruned to a **7-day** retention window (start value; configurable).
+  Drives a scroll-back "what did the check actually see" history panel — the
+  false-negative-diagnosis use case. (Even without numeric metrics, values like
+  `camera_fps=1.2` live in the message strings, so you get a poor-man's trend.)
+- **Deferred (Layer 3):** structured numeric metrics on `CheckReport` for real
+  graphable trend lines — bigger change (checks emit metrics), revisit later.
+- `at` stored as unix epoch seconds for easy duration math. Uptime computed by a
+  pure Rust function over transitions (testable). Prune runs periodically in the
+  scheduler loop.
+
 ## Deferred / future
 
 - Additional plugins: Music Assistant / Spotify, Unraid array & SMART, Plex,

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { MonitorStatus, Status } from "../types";
+import { MonitorDetail } from "./MonitorDetail";
 
 function statusLabel(status: Status | null): string {
   return status ?? "unknown";
@@ -82,9 +83,8 @@ export function MonitorCard({ monitor, onEdit, onDelete, onRunNow }: MonitorCard
         <button
           type="button"
           class="monitor-card-header"
-          onClick={() => hasComponents && setExpanded((v) => !v)}
-          aria-expanded={hasComponents ? expanded : undefined}
-          disabled={!hasComponents}
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
         >
           <span class={`dot dot-${status}`} aria-hidden="true" />
           <span class="monitor-name">{monitor.name}</span>
@@ -92,11 +92,9 @@ export function MonitorCard({ monitor, onEdit, onDelete, onRunNow }: MonitorCard
           <span class="monitor-message">
             {monitor.message ?? (monitor.status === null ? "not yet checked" : "")}
           </span>
-          {hasComponents && (
-            <span class={`chevron ${expanded ? "chevron-open" : ""}`} aria-hidden="true">
-              ▸
-            </span>
-          )}
+          <span class={`chevron ${expanded ? "chevron-open" : ""}`} aria-hidden="true">
+            ▸
+          </span>
           {!monitor.enabled && <span class="disabled-badge">disabled</span>}
         </button>
 
@@ -138,9 +136,9 @@ export function MonitorCard({ monitor, onEdit, onDelete, onRunNow }: MonitorCard
         </div>
       </div>
 
-      {hasComponents && (
-        <div class={`components ${expanded ? "components-open" : ""}`}>
-          <div class="components-inner">
+      <div class={`components ${expanded ? "components-open" : ""}`}>
+        <div class="components-inner">
+          {hasComponents && (
             <ul class="component-list">
               {monitor.components.map((c) => (
                 <li key={c.name} class="component-item">
@@ -151,9 +149,10 @@ export function MonitorCard({ monitor, onEdit, onDelete, onRunNow }: MonitorCard
                 </li>
               ))}
             </ul>
-          </div>
+          )}
+          {expanded && <MonitorDetail monitorId={monitor.id} />}
         </div>
-      )}
+      </div>
     </div>
   );
 }

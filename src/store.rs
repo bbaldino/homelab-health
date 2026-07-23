@@ -40,6 +40,14 @@ pub struct MonitorStatus {
     pub updated_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct Sample {
+    pub status: Status,
+    pub message: String,
+    pub components: Vec<Component>,
+    pub at: i64,
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
@@ -76,6 +84,9 @@ impl Store {
             .await?;
         // raw_sql (not query) so BOTH CREATE TABLE statements run.
         sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql(include_str!("../migrations/0002_history.sql"))
             .execute(&pool)
             .await?;
         Ok(Store { pool })
@@ -200,6 +211,138 @@ impl Store {
             .await?
             .rows_affected();
         Ok(rows > 0)
+    }
+
+    pub async fn record_sample(
+        &self,
+        monitor_id: i64,
+        report: &CheckReport,
+    ) -> Result<(), sqlx::Error> {
+        let components = serde_json::to_string(&report.components).unwrap_or_else(|_| "[]".into());
+        sqlx::query(
+            "INSERT INTO check_samples (monitor_id, status, message, components_json)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(monitor_id)
+        .bind(report.status.as_str())
+        .bind(&report.message)
+        .bind(components)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn record_transition(
+        &self,
+        monitor_id: i64,
+        status: Status,
+        message: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO status_transitions (monitor_id, status, message) VALUES (?1, ?2, ?3)",
+        )
+        .bind(monitor_id)
+        .bind(status.as_str())
+        .bind(message)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn prune_samples(&self, retention_days: i64) -> Result<u64, sqlx::Error> {
+        let retention_days = retention_days.max(1);
+        let res =
+            sqlx::query("DELETE FROM check_samples WHERE at < strftime('%s','now') - ?1 * 86400")
+                .bind(retention_days)
+                .execute(&self.pool)
+                .await?;
+        Ok(res.rows_affected())
+    }
+
+    pub async fn get_samples(
+        &self,
+        monitor_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Sample>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT status, message, components_json, at FROM check_samples
+             WHERE monitor_id = ?1 ORDER BY at DESC, id DESC LIMIT ?2",
+        )
+        .bind(monitor_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let status_str: String = r.try_get("status").unwrap_or_default();
+                let components_str: String = r.try_get("components_json").unwrap_or_default();
+                Sample {
+                    status: Status::from_db(&status_str),
+                    message: r.try_get("message").unwrap_or_default(),
+                    components: serde_json::from_str(&components_str).unwrap_or_default(),
+                    at: r.try_get("at").unwrap_or_default(),
+                }
+            })
+            .collect())
+    }
+
+    pub async fn get_transitions_since(
+        &self,
+        monitor_id: i64,
+        since: i64,
+    ) -> Result<Vec<(Status, i64)>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT status, at FROM status_transitions
+             WHERE monitor_id = ?1 AND at > ?2 ORDER BY at ASC, id ASC",
+        )
+        .bind(monitor_id)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let s: String = r.try_get("status").unwrap_or_default();
+                (Status::from_db(&s), r.try_get("at").unwrap_or_default())
+            })
+            .collect())
+    }
+
+    pub async fn status_at(&self, monitor_id: i64, at: i64) -> Result<Option<Status>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT status FROM status_transitions
+             WHERE monitor_id = ?1 AND at <= ?2 ORDER BY at DESC, id DESC LIMIT 1",
+        )
+        .bind(monitor_id)
+        .bind(at)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| {
+            let s: String = r.try_get("status").unwrap_or_default();
+            Status::from_db(&s)
+        }))
+    }
+
+    #[cfg(test)]
+    async fn insert_sample_at(
+        &self,
+        monitor_id: i64,
+        status: Status,
+        message: &str,
+        days_ago: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO check_samples (monitor_id, status, message, components_json, at)
+             VALUES (?1, ?2, ?3, '[]', strftime('%s','now') - ?4 * 86400)",
+        )
+        .bind(monitor_id)
+        .bind(status.as_str())
+        .bind(message)
+        .bind(days_ago)
+        .execute(&self.pool)
+        .await
+        .unwrap();
     }
 
     pub async fn get_status(&self, id: i64) -> Result<Option<MonitorStatus>, sqlx::Error> {
@@ -429,5 +572,62 @@ mod tests {
         s.create_monitor(sample()).await.unwrap();
         let all = s.list_status().await.unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn records_and_reads_samples() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        s.record_sample(m.id, &CheckReport::new(Status::Critical, "boom"))
+            .await
+            .unwrap();
+        s.record_sample(m.id, &CheckReport::ok("fine"))
+            .await
+            .unwrap();
+        let rows = s.get_samples(m.id, 10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        // newest first
+        assert_eq!(rows[0].status, Status::Ok);
+    }
+
+    #[tokio::test]
+    async fn records_transitions_and_status_at() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        s.record_transition(m.id, Status::Ok, "up").await.unwrap();
+        s.record_transition(m.id, Status::Critical, "down")
+            .await
+            .unwrap();
+        let since = s.get_transitions_since(m.id, 0).await.unwrap();
+        assert_eq!(since.len(), 2);
+        assert_eq!(since[0].0, Status::Ok); // ascending
+        // status_at "now+large" should be the latest (Critical)
+        let at_now = s.status_at(m.id, 9_999_999_999).await.unwrap();
+        assert_eq!(at_now, Some(Status::Critical));
+    }
+
+    #[tokio::test]
+    async fn prune_removes_old_samples_only() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        // an old sample (10 days ago) and a fresh one
+        s.insert_sample_at(m.id, Status::Ok, "old", 10).await; // helper below (test-only)
+        s.record_sample(m.id, &CheckReport::ok("new"))
+            .await
+            .unwrap();
+        let deleted = s.prune_samples(7).await.unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(s.get_samples(m.id, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deleting_monitor_cascades_history() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        s.record_sample(m.id, &CheckReport::ok("x")).await.unwrap();
+        s.record_transition(m.id, Status::Ok, "up").await.unwrap();
+        assert!(s.delete_monitor(m.id).await.unwrap());
+        assert!(s.get_samples(m.id, 10).await.unwrap().is_empty());
+        assert!(s.get_transitions_since(m.id, 0).await.unwrap().is_empty());
     }
 }

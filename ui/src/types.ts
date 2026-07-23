@@ -63,3 +63,32 @@ export interface CheckReport {
   message: string;
   components: Component[];
 }
+
+/**
+ * A single recorded check result for a monitor (history entry). `at` is a
+ * unix epoch-seconds timestamp — render via `new Date(at * 1000)`.
+ */
+export interface Sample {
+  status: Status;
+  message: string;
+  components: Component[];
+  at: number;
+}
+
+/** One contiguous run of a single status within an uptime window. */
+export interface Segment {
+  status: Status;
+  start: number;
+  end: number;
+}
+
+/** Uptime summary for a monitor over a trailing window (GET .../uptime). */
+export interface Uptime {
+  window_secs: number;
+  ok_secs: number;
+  degraded_secs: number;
+  critical_secs: number;
+  unknown_secs: number;
+  percent_ok: number;
+  segments: Segment[];
+}

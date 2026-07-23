@@ -6,10 +6,15 @@ Self-hosted service health monitor.
 
 ```bash
 cargo run
-# env (optional): HEALTH_BIND=0.0.0.0:8080  HEALTH_DB=health.db
+# env (optional): HEALTH_BIND=0.0.0.0:8080  HEALTH_DB=health.db  HEALTH_SAMPLE_RETENTION_DAYS=7
 ./seed.sh                      # seed a few monitors (edit hosts first)
 curl -s localhost:8080/api/v1/status | jq
 ```
+
+**Environment variables:**
+- `HEALTH_BIND` (default: `0.0.0.0:8080`) — address to bind the HTTP server to
+- `HEALTH_DB` (default: `health.db`) — path to SQLite database file
+- `HEALTH_SAMPLE_RETENTION_DAYS` (default: `7`) — how long raw check samples are kept for the history panel
 
 Monitors are managed through the web UI or the API (`/api/v1/monitors`); the
 SQLite DB is internal app state. See `docs/health-endpoint-contract.md` for the
