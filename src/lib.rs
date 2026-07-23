@@ -6,3 +6,4 @@ pub mod scheduler;
 pub mod status;
 pub mod store;
 pub mod ui;
+pub mod uptime;
