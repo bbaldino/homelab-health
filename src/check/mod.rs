@@ -22,6 +22,7 @@ pub struct Field {
     pub required: bool,
     pub default: Option<Value>,
     pub help: &'static str,
+    pub secret: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -135,5 +136,19 @@ mod tests {
         assert!(reg.get("json-health").is_some());
         assert!(reg.get("music-assistant").is_some());
         assert_eq!(reg.schemas().len(), 5);
+    }
+
+    #[test]
+    fn music_assistant_token_field_is_secret() {
+        let reg = Registry::with_builtins();
+        let (_, schema) = reg
+            .schemas()
+            .into_iter()
+            .find(|(id, _)| *id == "music-assistant")
+            .unwrap();
+        let token = schema.fields.iter().find(|f| f.name == "token").unwrap();
+        assert!(token.secret, "token field must be marked secret");
+        let url = schema.fields.iter().find(|f| f.name == "url").unwrap();
+        assert!(!url.secret);
     }
 }

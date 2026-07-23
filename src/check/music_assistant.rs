@@ -104,6 +104,7 @@ impl CheckType for MusicAssistantCheck {
                     required: true,
                     default: None,
                     help: "Music Assistant base URL, e.g. http://music-assistant.local:8095",
+                    secret: false,
                 },
                 Field {
                     name: "token",
@@ -111,6 +112,7 @@ impl CheckType for MusicAssistantCheck {
                     required: true,
                     default: None,
                     help: "Music Assistant long-lived API token",
+                    secret: true,
                 },
                 Field {
                     name: "timeout_secs",
@@ -118,6 +120,7 @@ impl CheckType for MusicAssistantCheck {
                     required: false,
                     default: Some(json!(10)),
                     help: "Overall timeout in seconds",
+                    secret: false,
                 },
             ],
         }
