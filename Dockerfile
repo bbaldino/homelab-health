@@ -1,5 +1,13 @@
 # syntax=docker/dockerfile:1
 
+# ---- ui builder ----
+FROM node:22-slim AS ui
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci
+COPY ui/ ./
+RUN npm run build
+
 # ---- builder ----
 FROM rust:1-bookworm AS builder
 # aws-lc-rs (pulled in by rustls) builds vendored C with CMake.
@@ -7,9 +15,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY migrations ./migrations
+# The built UI must be present before compiling (rust-embed embeds ui/dist).
+COPY --from=ui /ui/dist ./ui/dist
 RUN cargo build --release --locked
 
 # ---- runtime ----

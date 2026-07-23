@@ -6,6 +6,8 @@
 docs
 .superpowers
 node_modules
+ui/node_modules
+ui/dist
 *.db
 *.db-shm
 *.db-wal

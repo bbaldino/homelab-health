@@ -29,6 +29,7 @@ pub fn build_app(state: ApiState) -> Router {
         .route("/api/v1/status", get(list_status))
         .route("/api/v1/status/{id}", get(get_status))
         .route("/api/v1/monitors/{id}/run", post(run_now))
+        .fallback(crate::ui::serve_asset)
         .with_state(state)
 }
 

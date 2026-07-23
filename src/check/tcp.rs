@@ -37,6 +37,7 @@ impl CheckType for TcpCheck {
                     required: true,
                     default: None,
                     help: "Hostname or IP to connect to",
+                    secret: false,
                 },
                 Field {
                     name: "port",
@@ -44,6 +45,7 @@ impl CheckType for TcpCheck {
                     required: true,
                     default: None,
                     help: "TCP port that should accept connections",
+                    secret: false,
                 },
                 Field {
                     name: "timeout_secs",
@@ -51,6 +53,7 @@ impl CheckType for TcpCheck {
                     required: false,
                     default: Some(json!(5)),
                     help: "Connect timeout in seconds",
+                    secret: false,
                 },
             ],
         }

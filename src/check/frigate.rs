@@ -50,6 +50,7 @@ impl CheckType for FrigateCameraCheck {
                     required: true,
                     default: None,
                     help: "Frigate base URL, e.g. http://frigate.lan:5000",
+                    secret: false,
                 },
                 Field {
                     name: "min_camera_fps",
@@ -57,6 +58,7 @@ impl CheckType for FrigateCameraCheck {
                     required: false,
                     default: Some(json!(0.1)),
                     help: "camera_fps at or below this is treated as a dead feed",
+                    secret: false,
                 },
             ],
         }
