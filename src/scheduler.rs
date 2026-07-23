@@ -60,6 +60,7 @@ pub struct Scheduler {
     threshold: u32,
     timeout: Duration,
     debouncers: HashMap<i64, Debounce>,
+    retention_days: i64,
 }
 
 impl Scheduler {
@@ -70,7 +71,13 @@ impl Scheduler {
             threshold,
             timeout: Duration::from_secs(10),
             debouncers: HashMap::new(),
+            retention_days: 7,
         }
+    }
+
+    pub fn retention_days(mut self, days: i64) -> Self {
+        self.retention_days = days;
+        self
     }
 
     async fn run_check(&self, monitor: &Monitor) -> CheckReport {
@@ -85,13 +92,17 @@ impl Scheduler {
     /// persist to status_current when the committed status changes.
     pub async fn run_and_record(&mut self, monitor: &Monitor) -> Result<CheckReport, sqlx::Error> {
         let report = self.run_check(monitor).await;
+        self.store.record_sample(monitor.id, &report).await?;
         let threshold = self.threshold;
         let debounce = self
             .debouncers
             .entry(monitor.id)
             .or_insert_with(|| Debounce::new(threshold));
-        if debounce.record(report.status).is_some() {
+        if let Some(committed) = debounce.record(report.status) {
             self.store.save_status(monitor.id, &report).await?;
+            self.store
+                .record_transition(monitor.id, committed, &report.message)
+                .await?;
         }
         Ok(report)
     }
@@ -100,6 +111,10 @@ impl Scheduler {
     /// elapsed. Reads monitors from the DB each pass so API edits take effect.
     pub async fn run(mut self) {
         let mut last_run: HashMap<i64, tokio::time::Instant> = HashMap::new();
+        if let Err(e) = self.store.prune_samples(self.retention_days).await {
+            tracing::error!("prune failed: {e}");
+        }
+        let mut last_prune = tokio::time::Instant::now();
         loop {
             match self.store.list_monitors().await {
                 Ok(monitors) => {
@@ -115,6 +130,12 @@ impl Scheduler {
                                 tracing::error!("check '{}' failed to persist: {e}", monitor.name);
                             }
                         }
+                    }
+                    if now.duration_since(last_prune) >= Duration::from_secs(3600) {
+                        if let Err(e) = self.store.prune_samples(self.retention_days).await {
+                            tracing::error!("prune failed: {e}");
+                        }
+                        last_prune = now;
                     }
                 }
                 Err(e) => tracing::error!("scheduler could not list monitors: {e}"),
@@ -221,5 +242,32 @@ mod tests {
             store.get_status(m.id).await.unwrap().unwrap().status,
             Some(Status::Unknown)
         );
+    }
+
+    #[tokio::test]
+    async fn run_and_record_writes_a_sample_every_run() {
+        let (store, m) = store_with_monitor(
+            "tcp",
+            json!({ "host": "127.0.0.1", "port": 1, "timeout_secs": 1 }),
+        )
+        .await;
+        let mut sched = Scheduler::new(store.clone(), Arc::new(Registry::with_builtins()), 2);
+        sched.run_and_record(&m).await.unwrap();
+        sched.run_and_record(&m).await.unwrap();
+        assert_eq!(store.get_samples(m.id, 10).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn committed_change_writes_a_transition() {
+        let (store, m) = store_with_monitor(
+            "tcp",
+            json!({ "host": "127.0.0.1", "port": 1, "timeout_secs": 1 }),
+        )
+        .await;
+        let mut sched = Scheduler::new(store.clone(), Arc::new(Registry::with_builtins()), 2);
+        sched.run_and_record(&m).await.unwrap(); // 1st critical, not committed
+        assert_eq!(store.get_transitions_since(m.id, 0).await.unwrap().len(), 0);
+        sched.run_and_record(&m).await.unwrap(); // 2nd -> commit
+        assert_eq!(store.get_transitions_since(m.id, 0).await.unwrap().len(), 1);
     }
 }
