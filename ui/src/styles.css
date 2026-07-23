@@ -1,0 +1,377 @@
+:root {
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --surface-hover: #f9fafb;
+  --border: #e2e4e9;
+  --text: #1a1d23;
+  --text-muted: #666d7a;
+  --text-faint: #9aa1ad;
+  --accent: #4361ee;
+
+  --ok: #1b9e5a;
+  --ok-bg: #e5f7ee;
+  --degraded: #b3790a;
+  --degraded-bg: #fdf1dc;
+  --critical: #d92c2c;
+  --critical-bg: #fbe6e6;
+  --unknown: #6b7280;
+  --unknown-bg: #eceef1;
+
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --radius: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161b;
+    --surface: #1c1f26;
+    --surface-hover: #23262e;
+    --border: #2c2f38;
+    --text: #eceef1;
+    --text-muted: #9aa1ad;
+    --text-faint: #6b7280;
+    --accent: #7c93ff;
+
+    --ok: #4ade80;
+    --ok-bg: rgba(74, 222, 128, 0.12);
+    --degraded: #fbbf24;
+    --degraded-bg: rgba(251, 191, 36, 0.12);
+    --critical: #f87171;
+    --critical-bg: rgba(248, 113, 113, 0.14);
+    --unknown: #9aa1ad;
+    --unknown-bg: rgba(154, 161, 173, 0.14);
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+}
+
+/* Header */
+
+.app-header {
+  margin-bottom: 20px;
+}
+
+.app-header-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.app-header-top h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.refresh-hint {
+  font-size: 0.8rem;
+  color: var(--text-faint);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  box-shadow: var(--shadow);
+  font-size: 0.85rem;
+}
+
+.summary-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.last-updated {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 0.8rem;
+}
+
+/* Status dots */
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  display: inline-block;
+}
+
+.dot-ok {
+  background: var(--ok);
+}
+
+.dot-degraded {
+  background: var(--degraded);
+}
+
+.dot-critical {
+  background: var(--critical);
+}
+
+.dot-unknown {
+  background: var(--unknown);
+}
+
+/* Empty / error states */
+
+.error-banner {
+  background: var(--critical-bg);
+  color: var(--critical);
+  border: 1px solid var(--critical);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 0.9rem;
+}
+
+.empty-state {
+  color: var(--text-faint);
+  padding: 32px 0;
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+/* Status board */
+
+.status-board {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Monitor card */
+
+.monitor-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--unknown);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.monitor-card.status-ok {
+  border-left-color: var(--ok);
+}
+
+.monitor-card.status-degraded {
+  border-left-color: var(--degraded);
+}
+
+.monitor-card.status-critical {
+  border-left-color: var(--critical);
+}
+
+.monitor-card.status-unknown {
+  border-left-color: var(--unknown);
+}
+
+.monitor-card-header {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.monitor-card-header:disabled {
+  cursor: default;
+}
+
+.monitor-card-header:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.monitor-card-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.monitor-name {
+  font-weight: 600;
+  flex: none;
+}
+
+.monitor-type {
+  font-size: 0.75rem;
+  color: var(--text-faint);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  flex: none;
+}
+
+.monitor-message {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.disabled-badge {
+  font-size: 0.7rem;
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  flex: none;
+}
+
+.chevron {
+  flex: none;
+  color: var(--text-faint);
+  transition: transform 0.2s ease;
+  font-size: 0.75rem;
+}
+
+.chevron-open {
+  transform: rotate(90deg);
+}
+
+/* Expand/collapse via grid-template-rows trick for a smooth height animation */
+
+.components {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease;
+}
+
+.components-open {
+  grid-template-rows: 1fr;
+}
+
+.components-inner {
+  overflow: hidden;
+}
+
+.component-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 14px 12px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.component-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.component-name {
+  font-weight: 500;
+  flex: none;
+}
+
+.component-message {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.critical-marker {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 700;
+  color: var(--critical);
+  background: var(--critical-bg);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex: none;
+}
+
+/* Responsive: phone widths */
+
+@media (max-width: 480px) {
+  .app {
+    padding: 16px 10px 48px;
+  }
+
+  .app-header-top {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .summary {
+    font-size: 0.8rem;
+    gap: 10px;
+  }
+
+  .last-updated {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .monitor-card-header {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .monitor-message {
+    order: 4;
+    white-space: normal;
+    width: 100%;
+    flex-basis: 100%;
+  }
+
+  .component-list {
+    padding-left: 24px;
+  }
+}
