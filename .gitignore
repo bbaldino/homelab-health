@@ -5,6 +5,8 @@ node_modules
 *.db-shm
 *.db-wal
 *.db-journal
+ui/dist
+ui/node_modules
 
 
 # Added by cargo
