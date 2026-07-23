@@ -59,8 +59,12 @@ pub fn compute_uptime(
     segments.retain(|s| s.end > s.start);
 
     let window_secs = (now - window_start).max(0);
-    let percent_ok = if window_secs > 0 {
-        ok as f64 / window_secs as f64 * 100.0
+    // Percentage is over OBSERVED time (ok+degraded+critical), not wall-clock:
+    // "unknown" spans (before monitoring started, or unreachable) don't count as
+    // downtime, so a monitor that's been up since we started watching reads ~100%.
+    let observed = ok + degraded + critical;
+    let percent_ok = if observed > 0 {
+        ok as f64 / observed as f64 * 100.0
     } else {
         0.0
     };
@@ -106,6 +110,16 @@ mod tests {
         let u = compute_uptime(Status::Unknown, &[], 0, 50);
         assert_eq!(u.unknown_secs, 50);
         assert_eq!(u.percent_ok, 0.0);
+    }
+
+    #[test]
+    fn unknown_time_excluded_from_percent() {
+        // Unknown for the first half (before we were watching), Ok for the second.
+        // Of observed time it was 100% ok, even though half the window is unknown.
+        let u = compute_uptime(Status::Unknown, &[(Status::Ok, 50)], 0, 100);
+        assert_eq!(u.unknown_secs, 50);
+        assert_eq!(u.ok_secs, 50);
+        assert_eq!(u.percent_ok, 100.0);
     }
 
     #[test]
