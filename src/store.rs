@@ -250,6 +250,7 @@ impl Store {
     }
 
     pub async fn prune_samples(&self, retention_days: i64) -> Result<u64, sqlx::Error> {
+        let retention_days = retention_days.max(1);
         let res =
             sqlx::query("DELETE FROM check_samples WHERE at < strftime('%s','now') - ?1 * 86400")
                 .bind(retention_days)
@@ -617,5 +618,16 @@ mod tests {
         let deleted = s.prune_samples(7).await.unwrap();
         assert_eq!(deleted, 1);
         assert_eq!(s.get_samples(m.id, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deleting_monitor_cascades_history() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        s.record_sample(m.id, &CheckReport::ok("x")).await.unwrap();
+        s.record_transition(m.id, Status::Ok, "up").await.unwrap();
+        assert!(s.delete_monitor(m.id).await.unwrap());
+        assert!(s.get_samples(m.id, 10).await.unwrap().is_empty());
+        assert!(s.get_transitions_since(m.id, 0).await.unwrap().is_empty());
     }
 }

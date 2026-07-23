@@ -19,6 +19,7 @@ pub struct Uptime {
     pub segments: Vec<Segment>,
 }
 
+/// transitions must be ascending by `at`; out-of-order input misattributes durations.
 pub fn compute_uptime(
     prior: Status,
     transitions: &[(Status, i64)],
@@ -54,6 +55,8 @@ pub fn compute_uptime(
         current = *status;
     }
     add(current, seg_start, now);
+
+    segments.retain(|s| s.end > s.start);
 
     let window_secs = (now - window_start).max(0);
     let percent_ok = if window_secs > 0 {
@@ -103,5 +106,14 @@ mod tests {
         let u = compute_uptime(Status::Unknown, &[], 0, 50);
         assert_eq!(u.unknown_secs, 50);
         assert_eq!(u.percent_ok, 0.0);
+    }
+
+    #[test]
+    fn transition_at_now_produces_no_zero_width_segment() {
+        // Ok whole window; a transition exactly at `now` must not add a 0-width segment.
+        let u = compute_uptime(Status::Ok, &[(Status::Critical, 100)], 0, 100);
+        assert_eq!(u.segments.len(), 1);
+        assert_eq!(u.ok_secs, 100);
+        assert_eq!(u.critical_secs, 0);
     }
 }
