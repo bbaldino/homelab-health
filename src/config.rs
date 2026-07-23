@@ -4,6 +4,7 @@
 pub struct Config {
     pub bind: String,
     pub db_url: String,
+    pub retention_days: i64,
 }
 
 impl Config {
@@ -12,9 +13,13 @@ impl Config {
     pub fn resolve(get: impl Fn(&str) -> Option<String>) -> Config {
         let bind = get("HEALTH_BIND").unwrap_or_else(|| "0.0.0.0:8080".to_string());
         let db_path = get("HEALTH_DB").unwrap_or_else(|| "health.db".to_string());
+        let retention_days = get("HEALTH_SAMPLE_RETENTION_DAYS")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7);
         Config {
             bind,
             db_url: format!("sqlite://{db_path}"),
+            retention_days,
         }
     }
 
@@ -41,6 +46,7 @@ mod tests {
         let cfg = Config::resolve(getter(&[]));
         assert_eq!(cfg.bind, "0.0.0.0:8080");
         assert_eq!(cfg.db_url, "sqlite://health.db");
+        assert_eq!(cfg.retention_days, 7);
     }
 
     #[test]
@@ -51,5 +57,12 @@ mod tests {
         ]));
         assert_eq!(cfg.bind, "127.0.0.1:9000");
         assert_eq!(cfg.db_url, "sqlite:///data/h.db");
+        assert_eq!(cfg.retention_days, 7);
+    }
+
+    #[test]
+    fn reads_retention_days_override() {
+        let cfg = Config::resolve(getter(&[("HEALTH_SAMPLE_RETENTION_DAYS", "30")]));
+        assert_eq!(cfg.retention_days, 30);
     }
 }

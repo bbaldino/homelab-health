@@ -21,7 +21,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = Arc::new(Registry::with_builtins());
 
     // Background scheduler.
-    let scheduler = Scheduler::new(store.clone(), registry.clone(), DEBOUNCE_THRESHOLD);
+    let scheduler = Scheduler::new(store.clone(), registry.clone(), DEBOUNCE_THRESHOLD)
+        .retention_days(config.retention_days);
     tokio::spawn(scheduler.run());
 
     // HTTP API.
