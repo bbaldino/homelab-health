@@ -1,0 +1,17 @@
+[workspace]
+# This is an application shipped as a container image, not a library.
+# Never publish to crates.io.
+publish = false
+
+# This crate is never published to any registry, so derive the last-released
+# version from git tags instead of crates.io. Without this, release-plz treats
+# every run as the crate's first release and never bumps past the current
+# Cargo.toml version. (git_only runs `cargo package --verify`, which is why
+# ui/dist must exist in the source tree — see ui/dist/.gitkeep.)
+git_only = true
+
+# Cut a GitHub release alongside the tag so the changelog is visible there.
+git_release_enable = true
+
+# The tag format publish-image.yml matches on: v*.*.*
+git_tag_name = "v{{version}}"

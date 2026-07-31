@@ -1,0 +1,33 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-plz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # release-plz needs full history for changelogs
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          # NOT secrets.GITHUB_TOKEN: tags pushed with it do not trigger
+          # publish-image.yml, so the release would silently produce no image.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}

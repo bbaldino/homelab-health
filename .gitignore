@@ -5,7 +5,8 @@ node_modules
 *.db-shm
 *.db-wal
 *.db-journal
-ui/dist
+ui/dist/*
+!ui/dist/.gitkeep
 ui/node_modules
 ui/tsconfig.tsbuildinfo
 
