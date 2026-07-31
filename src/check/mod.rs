@@ -98,6 +98,7 @@ pub mod frigate;
 pub mod http;
 pub mod json_health;
 pub mod music_assistant;
+pub mod prometheus;
 pub mod tcp;
 pub mod unraid;
 
