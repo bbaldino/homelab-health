@@ -2,9 +2,9 @@ use super::{CheckType, ConfigSchema, Field, FieldKind};
 use crate::report::{CheckReport, Component};
 use crate::status::Status;
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 /// A single scalar metric series, decoupled from the parser crate so `evaluate`
@@ -171,6 +171,38 @@ pub async fn fetch_and_parse(url: &str, timeout_secs: u64) -> Result<Vec<Series>
         })
         .collect();
     Ok(series)
+}
+
+#[derive(Serialize)]
+pub struct MetricInfo {
+    pub labels: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Serialize)]
+pub struct InspectResult {
+    pub metrics: BTreeMap<String, MetricInfo>,
+}
+
+/// Build a metric-name → {label key → sorted unique values} map for autocomplete.
+pub fn inspect_result(series: &[Series]) -> InspectResult {
+    let mut acc: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+    for s in series {
+        let entry = acc.entry(s.metric.clone()).or_default();
+        for (k, v) in &s.labels {
+            entry.entry(k.clone()).or_default().insert(v.clone());
+        }
+    }
+    let metrics = acc
+        .into_iter()
+        .map(|(metric, labels)| {
+            let labels = labels
+                .into_iter()
+                .map(|(k, vs)| (k, vs.into_iter().collect::<Vec<_>>()))
+                .collect();
+            (metric, MetricInfo { labels })
+        })
+        .collect();
+    InspectResult { metrics }
 }
 
 fn series_name(metric: &str, labels: &BTreeMap<String, String>) -> String {
@@ -634,5 +666,25 @@ mod tests {
             .run(&json!({ "url": "http://x", "bogus": 1 }))
             .await;
         assert_eq!(report.status, Status::Unknown);
+    }
+
+    #[test]
+    fn inspect_result_groups_label_values() {
+        let s = vec![
+            series("status", &[("task", "backup"), ("repo", "unraid")], 0.0),
+            series("status", &[("task", "hook"), ("repo", "unraid")], 1.0),
+            series("warnings", &[("plan", "stacks")], 0.0),
+        ];
+        let r = inspect_result(&s);
+        let status = r.metrics.get("status").unwrap();
+        assert_eq!(
+            status.labels.get("task").unwrap(),
+            &vec!["backup".to_string(), "hook".to_string()]
+        );
+        assert_eq!(
+            status.labels.get("repo").unwrap(),
+            &vec!["unraid".to_string()]
+        ); // de-duped
+        assert!(r.metrics.contains_key("warnings"));
     }
 }
