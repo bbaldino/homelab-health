@@ -1,0 +1,10 @@
+[workspace]
+# This is an application shipped as a container image, not a library.
+# Never publish to crates.io.
+publish = false
+
+# Cut a GitHub release alongside the tag so the changelog is visible there.
+git_release_enable = true
+
+# The tag format publish-image.yml matches on: v*.*.*
+git_tag_name = "v{{version}}"
