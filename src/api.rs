@@ -24,6 +24,7 @@ fn internal(e: sqlx::Error) -> StatusCode {
 
 pub fn build_app(state: ApiState) -> Router {
     Router::new()
+        .route("/api/v1/version", get(version))
         .route("/api/v1/check-types", get(check_types))
         .route("/api/v1/monitors", get(list_monitors).post(create_monitor))
         .route(
@@ -37,6 +38,12 @@ pub fn build_app(state: ApiState) -> Router {
         .route("/api/v1/monitors/{id}/uptime", get(monitor_uptime))
         .fallback(crate::ui::serve_asset)
         .with_state(state)
+}
+
+/// Reports the running build's version, read from the crate version at compile
+/// time. The release tag drives Cargo.toml, so this reflects the released image.
+async fn version() -> Json<Value> {
+    Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn check_types(State(state): State<ApiState>) -> Json<Value> {
@@ -222,6 +229,18 @@ mod tests {
             .unwrap();
         let arr = body.as_array().unwrap();
         assert_eq!(arr.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn version_endpoint_reports_crate_version() {
+        let (base, _store) = spawn().await;
+        let body: Value = reqwest::get(format!("{base}/api/v1/version"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[tokio::test]
