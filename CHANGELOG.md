@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/bbaldino/homelab-health/compare/v0.1.1...v0.2.0) - 2026-07-31
+
+### Added
+
+- metric/label autocomplete in the prometheus rule builder
+- UI list-of-objects field kind and options dropdowns
+- prometheus inspect endpoint for metric/label autocomplete
+- prometheus check evaluation, schema, and registration
+- prometheus check core — config, rules, matcher parser, scrape
+- add List field kind and options to config schema
+
+### Fixed
+
+- normalize existing list-field rows to form values on load
+
+### Other
+
+- prometheus metrics check implementation plan
+- prometheus metrics check design spec
+
 ## [0.1.1](https://github.com/bbaldino/homelab-health/compare/v0.1.0...v0.1.1) - 2026-07-31
 
 ### Added
