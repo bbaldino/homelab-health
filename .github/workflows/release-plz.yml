@@ -18,7 +18,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: release-plz/action@v0
+      - uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
@@ -26,7 +26,7 @@ jobs:
           # publish-image.yml, so the release would silently produce no image.
           GITHUB_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
 
-      - uses: release-plz/action@v0
+      - uses: release-plz/action@v0.5
         with:
           command: release
         env:
