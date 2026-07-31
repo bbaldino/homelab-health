@@ -44,11 +44,13 @@ export interface MonitorStatus extends Monitor {
 /** One field in a check type's config schema. */
 export interface Field {
   name: string;
-  kind: "string" | "int" | "float" | "bool";
+  kind: "string" | "int" | "float" | "bool" | "list";
   required: boolean;
   default: unknown;
   help: string;
   secret: boolean;
+  options?: (string | number | boolean)[];
+  fields?: Field[];
 }
 
 /** The config schema advertised by a check type (e.g. "http", "tcp"). */
@@ -91,4 +93,9 @@ export interface Uptime {
   unknown_secs: number;
   percent_ok: number;
   segments: Segment[];
+}
+
+/** Result of inspecting a Prometheus metrics endpoint (POST .../checks/prometheus/inspect). */
+export interface PrometheusInspect {
+  metrics: Record<string, { labels: Record<string, string[]> }>;
 }

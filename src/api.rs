@@ -26,6 +26,10 @@ pub fn build_app(state: ApiState) -> Router {
     Router::new()
         .route("/api/v1/version", get(version))
         .route("/api/v1/check-types", get(check_types))
+        .route(
+            "/api/v1/checks/prometheus/inspect",
+            post(prometheus_inspect),
+        )
         .route("/api/v1/monitors", get(list_monitors).post(create_monitor))
         .route(
             "/api/v1/monitors/{id}",
@@ -56,6 +60,34 @@ async fn check_types(State(state): State<ApiState>) -> Json<Value> {
         })
         .collect();
     Json(json!(schemas))
+}
+
+#[derive(serde::Deserialize)]
+struct InspectRequest {
+    url: String,
+    timeout_secs: Option<u64>,
+}
+
+async fn prometheus_inspect(
+    Json(req): Json<InspectRequest>,
+) -> Result<Json<crate::check::prometheus::InspectResult>, (StatusCode, String)> {
+    let timeout = req.timeout_secs.unwrap_or(10);
+    match crate::check::prometheus::fetch_and_parse(&req.url, timeout).await {
+        Ok(series) => Ok(Json(crate::check::prometheus::inspect_result(&series))),
+        Err(e) => {
+            let msg = match e {
+                crate::check::prometheus::ScrapeError::Timeout => "timed out".to_string(),
+                crate::check::prometheus::ScrapeError::Unreachable(m) => {
+                    format!("unreachable: {m}")
+                }
+                crate::check::prometheus::ScrapeError::BadStatus(c) => format!("HTTP {c}"),
+                crate::check::prometheus::ScrapeError::Unparseable(m) => {
+                    format!("not Prometheus metrics: {m}")
+                }
+            };
+            Err((StatusCode::BAD_GATEWAY, msg))
+        }
+    }
 }
 
 async fn list_monitors(State(state): State<ApiState>) -> Result<Json<Vec<Monitor>>, StatusCode> {
@@ -228,7 +260,7 @@ mod tests {
             .await
             .unwrap();
         let arr = body.as_array().unwrap();
-        assert_eq!(arr.len(), 6);
+        assert_eq!(arr.len(), 7);
     }
 
     #[tokio::test]
@@ -457,5 +489,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn prometheus_inspect_returns_metric_map() {
+        let metrics_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("# TYPE up gauge\nup{job=\"a\"} 1\n"),
+            )
+            .mount(&metrics_server)
+            .await;
+        let (base, _store) = spawn().await;
+        let body: Value = reqwest::Client::new()
+            .post(format!("{base}/api/v1/checks/prometheus/inspect"))
+            .json(&json!({ "url": metrics_server.uri() }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            body["metrics"]["up"]["labels"]["job"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("a"))
+        );
+    }
+
+    #[tokio::test]
+    async fn prometheus_inspect_unreachable_is_502() {
+        let (base, _store) = spawn().await;
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/v1/checks/prometheus/inspect"))
+            .json(&json!({ "url": "http://127.0.0.1:1/metrics", "timeout_secs": 1 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
     }
 }

@@ -118,6 +118,8 @@ impl CheckType for JsonHealthCheck {
                     default: None,
                     help: "URL of the service's JSON /health endpoint",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
                 Field {
                     name: "timeout_secs",
@@ -126,6 +128,8 @@ impl CheckType for JsonHealthCheck {
                     default: Some(json!(10)),
                     help: "Request timeout in seconds",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
             ],
         }

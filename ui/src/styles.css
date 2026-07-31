@@ -838,6 +838,23 @@ body {
   flex: 1 1 auto;
 }
 
+.list-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+  margin-bottom: 0.5rem;
+}
+
+.list-row .form-field {
+  flex: 1 1 8rem;
+  margin: 0;
+}
+
+.list-row-remove {
+  flex: 0 0 auto;
+}
+
 .form-loading {
   color: var(--text-faint);
   font-size: 0.9rem;

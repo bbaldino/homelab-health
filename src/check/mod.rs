@@ -13,6 +13,7 @@ pub enum FieldKind {
     Int,
     Float,
     Bool,
+    List,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -23,6 +24,12 @@ pub struct Field {
     pub default: Option<Value>,
     pub help: &'static str,
     pub secret: bool,
+    /// Fixed set of allowed values → the UI renders a dropdown. None = free input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<Value>>,
+    /// Sub-field schema for a `List` item. None for scalar fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<Field>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -83,6 +90,7 @@ impl Registry {
         reg.register(Arc::new(crate::check::json_health::JsonHealthCheck));
         reg.register(Arc::new(crate::check::music_assistant::MusicAssistantCheck));
         reg.register(Arc::new(crate::check::unraid::UnraidCheck));
+        reg.register(Arc::new(crate::check::prometheus::PrometheusCheck));
         reg
     }
 }
@@ -91,6 +99,7 @@ pub mod frigate;
 pub mod http;
 pub mod json_health;
 pub mod music_assistant;
+pub mod prometheus;
 pub mod tcp;
 pub mod unraid;
 
@@ -138,7 +147,51 @@ mod tests {
         assert!(reg.get("json-health").is_some());
         assert!(reg.get("music-assistant").is_some());
         assert!(reg.get("unraid").is_some());
-        assert_eq!(reg.schemas().len(), 6);
+        assert!(reg.get("prometheus").is_some());
+        assert_eq!(reg.schemas().len(), 7);
+    }
+
+    #[test]
+    fn list_field_with_options_serializes() {
+        let f = Field {
+            name: "rules",
+            kind: FieldKind::List,
+            required: false,
+            default: None,
+            help: "rules",
+            secret: false,
+            options: None,
+            fields: Some(vec![Field {
+                name: "op",
+                kind: FieldKind::String,
+                required: true,
+                default: None,
+                help: "comparison",
+                secret: false,
+                options: Some(vec![serde_json::json!(">"), serde_json::json!("!=")]),
+                fields: None,
+            }]),
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["kind"], "list");
+        assert_eq!(v["fields"][0]["name"], "op");
+        assert_eq!(v["fields"][0]["options"][0], ">");
+        // Absent optionals must be omitted, not null (keeps existing responses stable).
+        let scalar = serde_json::to_value(&f.fields.as_ref().unwrap()[0]).unwrap();
+        let plain = serde_json::to_value(Field {
+            name: "url",
+            kind: FieldKind::String,
+            required: true,
+            default: None,
+            help: "u",
+            secret: false,
+            options: None,
+            fields: None,
+        })
+        .unwrap();
+        assert!(plain.get("options").is_none());
+        assert!(plain.get("fields").is_none());
+        let _ = scalar;
     }
 
     #[test]

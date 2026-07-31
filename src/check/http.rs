@@ -41,6 +41,8 @@ impl CheckType for HttpCheck {
                     default: None,
                     help: "URL to request (GET)",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
                 Field {
                     name: "expected_status",
@@ -49,6 +51,8 @@ impl CheckType for HttpCheck {
                     default: Some(json!(200)),
                     help: "HTTP status code that means healthy",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
                 Field {
                     name: "timeout_secs",
@@ -57,6 +61,8 @@ impl CheckType for HttpCheck {
                     default: Some(json!(10)),
                     help: "Request timeout in seconds",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
             ],
         }
