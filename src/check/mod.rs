@@ -90,6 +90,7 @@ impl Registry {
         reg.register(Arc::new(crate::check::json_health::JsonHealthCheck));
         reg.register(Arc::new(crate::check::music_assistant::MusicAssistantCheck));
         reg.register(Arc::new(crate::check::unraid::UnraidCheck));
+        reg.register(Arc::new(crate::check::prometheus::PrometheusCheck));
         reg
     }
 }
@@ -146,7 +147,8 @@ mod tests {
         assert!(reg.get("json-health").is_some());
         assert!(reg.get("music-assistant").is_some());
         assert!(reg.get("unraid").is_some());
-        assert_eq!(reg.schemas().len(), 6);
+        assert!(reg.get("prometheus").is_some());
+        assert_eq!(reg.schemas().len(), 7);
     }
 
     #[test]
