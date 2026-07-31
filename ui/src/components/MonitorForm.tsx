@@ -19,7 +19,13 @@ interface MonitorFormProps {
 
 function initialFieldValue(field: Field, existing: unknown): FieldValue {
   if (field.kind === "list") {
-    return Array.isArray(existing) ? (existing as Record<string, unknown>[]) : [];
+    const existingRows = Array.isArray(existing) ? (existing as Record<string, unknown>[]) : [];
+    const subFields = field.fields ?? [];
+    return existingRows.map((row) => {
+      const out: Record<string, unknown> = {};
+      for (const sf of subFields) out[sf.name] = initialFieldValue(sf, row[sf.name]);
+      return out;
+    });
   }
   const raw = existing !== undefined ? existing : field.default;
   if (field.kind === "bool") return Boolean(raw);
