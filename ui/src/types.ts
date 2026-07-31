@@ -94,3 +94,8 @@ export interface Uptime {
   percent_ok: number;
   segments: Segment[];
 }
+
+/** Result of inspecting a Prometheus metrics endpoint (POST .../checks/prometheus/inspect). */
+export interface PrometheusInspect {
+  metrics: Record<string, { labels: Record<string, string[]> }>;
+}

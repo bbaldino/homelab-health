@@ -4,6 +4,7 @@ import type {
   Monitor,
   MonitorStatus,
   NewMonitor,
+  PrometheusInspect,
   Sample,
   Uptime,
 } from "./types";
@@ -76,6 +77,13 @@ export class ApiClient {
 
   getUptime(id: number, windowSecs: number): Promise<Uptime> {
     return request<Uptime>(`/monitors/${id}/uptime?window=${windowSecs}`);
+  }
+
+  inspectPrometheus(url: string, timeoutSecs?: number): Promise<PrometheusInspect> {
+    return request<PrometheusInspect>("/checks/prometheus/inspect", {
+      method: "POST",
+      body: JSON.stringify({ url, timeout_secs: timeoutSecs }),
+    });
   }
 }
 

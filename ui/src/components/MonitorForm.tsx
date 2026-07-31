@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, ApiError } from "../api";
-import type { CheckTypeSchema, Field, MonitorStatus, NewMonitor } from "../types";
+import type { CheckTypeSchema, Field, MonitorStatus, NewMonitor, PrometheusInspect } from "../types";
 import { SchemaField, humanize } from "./SchemaField";
 
 /**
@@ -83,6 +83,10 @@ export function MonitorForm({ mode, monitor, onSubmit, onCancel }: MonitorFormPr
   const [enabled, setEnabled] = useState(monitor?.enabled ?? true);
   const [configValues, setConfigValues] = useState<Record<string, FieldValue>>({});
 
+  const [inspect, setInspect] = useState<PrometheusInspect | null>(null);
+  const [inspecting, setInspecting] = useState(false);
+  const [inspectMessage, setInspectMessage] = useState<string | null>(null);
+
   const [validationError, setValidationError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -119,6 +123,61 @@ export function MonitorForm({ mode, monitor, onSubmit, onCancel }: MonitorFormPr
     setTypeId(newTypeId);
     const schema = checkTypes?.find((t) => t.type_id === newTypeId);
     setConfigValues(buildInitialConfig(schema?.schema.fields ?? []));
+    setInspect(null);
+    setInspectMessage(null);
+  }
+
+  const prometheusUrl =
+    typeId === "prometheus" && typeof configValues.url === "string"
+      ? (configValues.url as string).trim()
+      : "";
+
+  async function handleFetchMetrics() {
+    if (!prometheusUrl) return;
+    setInspecting(true);
+    setInspectMessage(null);
+    const timeoutRaw = configValues.timeout_secs;
+    const timeoutSecs =
+      typeof timeoutRaw === "string" && timeoutRaw.trim() !== "" && Number.isFinite(Number(timeoutRaw))
+        ? Number(timeoutRaw)
+        : undefined;
+    try {
+      const result = await api.inspectPrometheus(prometheusUrl, timeoutSecs);
+      setInspect(result);
+      const count = Object.keys(result.metrics).length;
+      setInspectMessage(`Fetched ${count} metric${count === 1 ? "" : "s"}`);
+    } catch (err) {
+      setInspect(null);
+      setInspectMessage(
+        err instanceof ApiError ? err.message : err instanceof Error ? err.message : String(err),
+      );
+    } finally {
+      setInspecting(false);
+    }
+  }
+
+  /**
+   * Suggestion source for the prometheus "rules" list: metric names for the
+   * `metric` sub-field, and that row's chosen metric's `key="value"` label
+   * matchers (plus bare `key=""` stubs) for the `labels` sub-field.
+   */
+  function suggestRuleField(subFieldName: string, row: Record<string, unknown>): string[] {
+    if (!inspect) return [];
+    if (subFieldName === "metric") {
+      return Object.keys(inspect.metrics);
+    }
+    if (subFieldName === "labels") {
+      const metricName = typeof row.metric === "string" ? row.metric : "";
+      const info = inspect.metrics[metricName];
+      if (!info) return [];
+      const out: string[] = [];
+      for (const [key, values] of Object.entries(info.labels)) {
+        out.push(`${key}=""`);
+        for (const v of values) out.push(`${key}="${v}"`);
+      }
+      return out;
+    }
+    return [];
   }
 
   async function handleSubmit(e: Event) {
@@ -229,6 +288,19 @@ export function MonitorForm({ mode, monitor, onSubmit, onCancel }: MonitorFormPr
       {fields.length > 0 && (
         <fieldset class="schema-fields">
           <legend>Configuration</legend>
+          {typeId === "prometheus" && (
+            <div class="form-field prometheus-inspect">
+              <button
+                type="button"
+                class="btn btn-secondary"
+                disabled={!prometheusUrl || inspecting}
+                onClick={handleFetchMetrics}
+              >
+                {inspecting ? "Fetching…" : "Fetch metrics"}
+              </button>
+              {inspectMessage && <span class="field-help inspect-status">{inspectMessage}</span>}
+            </div>
+          )}
           {fields.map((field) => (
             <SchemaField
               key={field.name}
@@ -237,6 +309,7 @@ export function MonitorForm({ mode, monitor, onSubmit, onCancel }: MonitorFormPr
               onChange={(v) =>
                 setConfigValues((prev) => ({ ...prev, [field.name]: v as FieldValue }))
               }
+              suggest={typeId === "prometheus" && field.kind === "list" ? suggestRuleField : undefined}
             />
           ))}
         </fieldset>

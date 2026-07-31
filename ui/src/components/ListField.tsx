@@ -5,6 +5,13 @@ interface ListFieldProps {
   field: Field;
   value: Record<string, unknown>[];
   onChange: (value: unknown) => void;
+  /**
+   * Optional per-row suggestion source, e.g. metric/label matcher
+   * autocomplete for the prometheus rule builder. Given a sub-field name
+   * and the row it belongs to, returns candidate values for a <datalist>.
+   * Absent for non-prometheus lists.
+   */
+  suggest?: (subFieldName: string, row: Record<string, unknown>) => string[];
 }
 
 function emptyRow(subFields: Field[]): Record<string, unknown> {
@@ -15,7 +22,7 @@ function emptyRow(subFields: Field[]): Record<string, unknown> {
   return row;
 }
 
-export function ListField({ field, value, onChange }: ListFieldProps) {
+export function ListField({ field, value, onChange, suggest }: ListFieldProps) {
   const subFields = field.fields ?? [];
   const rows = value;
 
@@ -39,6 +46,8 @@ export function ListField({ field, value, onChange }: ListFieldProps) {
                 next[i] = { ...row, [sf.name]: v };
                 update(next);
               }}
+              textSuggestions={suggest ? suggest(sf.name, row) : undefined}
+              datalistId={`field-${field.name}-${i}-${sf.name}-list`}
             />
           ))}
           <button
