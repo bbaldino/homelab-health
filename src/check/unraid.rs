@@ -168,6 +168,8 @@ impl CheckType for UnraidCheck {
                     default: None,
                     help: "Unraid base URL, e.g. http://tower.local",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
                 Field {
                     name: "api_key",
@@ -176,6 +178,8 @@ impl CheckType for UnraidCheck {
                     default: None,
                     help: "Unraid API key (Settings -> Management Access -> API Keys)",
                     secret: true,
+                    options: None,
+                    fields: None,
                 },
                 Field {
                     name: "free_space_warn_pct",
@@ -184,6 +188,8 @@ impl CheckType for UnraidCheck {
                     default: Some(json!(10.0)),
                     help: "Array free %% at/below this is Degraded",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
                 Field {
                     name: "free_space_critical_pct",
@@ -192,6 +198,8 @@ impl CheckType for UnraidCheck {
                     default: Some(json!(3.0)),
                     help: "Array free %% at/below this is Critical",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
                 Field {
                     name: "disk_temp_warn_c",
@@ -200,6 +208,8 @@ impl CheckType for UnraidCheck {
                     default: Some(json!(55)),
                     help: "Disk temp (C) at/above this is Degraded",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
                 Field {
                     name: "timeout_secs",
@@ -208,6 +218,8 @@ impl CheckType for UnraidCheck {
                     default: Some(json!(10)),
                     help: "Request timeout in seconds",
                     secret: false,
+                    options: None,
+                    fields: None,
                 },
             ],
         }
