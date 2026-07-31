@@ -1,4 +1,5 @@
 import type { Field } from "../types";
+import { ListField } from "./ListField";
 
 interface SchemaFieldProps {
   field: Field;
@@ -22,6 +23,39 @@ export function humanize(name: string): string {
 export function SchemaField({ field, value, onChange, autoFocus }: SchemaFieldProps) {
   const inputId = `field-${field.name}`;
   const label = humanize(field.name);
+
+  if (field.kind === "list") {
+    return (
+      <ListField
+        field={field}
+        value={Array.isArray(value) ? (value as Record<string, unknown>[]) : []}
+        onChange={onChange}
+      />
+    );
+  }
+
+  if (field.options && field.kind !== "bool") {
+    return (
+      <div class="form-field">
+        <label class="field-label" for={inputId}>
+          {label}
+          {field.required && <span class="required-marker">*</span>}
+        </label>
+        <select
+          id={inputId}
+          value={toInputValue(value)}
+          autoFocus={autoFocus}
+          onChange={(e) => onChange(e.currentTarget.value)}
+        >
+          <option value="" disabled>—</option>
+          {field.options.map((opt) => (
+            <option key={String(opt)} value={String(opt)}>{String(opt)}</option>
+          ))}
+        </select>
+        {field.help && <p class="field-help">{field.help}</p>}
+      </div>
+    );
+  }
 
   if (field.kind === "bool") {
     return (

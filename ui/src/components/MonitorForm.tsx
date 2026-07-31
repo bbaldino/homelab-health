@@ -3,8 +3,11 @@ import { api, ApiError } from "../api";
 import type { CheckTypeSchema, Field, MonitorStatus, NewMonitor } from "../types";
 import { SchemaField, humanize } from "./SchemaField";
 
-/** In-form representation of a config value: string for text/number kinds, boolean for bool. */
-type FieldValue = string | boolean;
+/**
+ * In-form representation of a config value: string for text/number kinds,
+ * boolean for bool, or an array of coerced sub-objects for a list field.
+ */
+type FieldValue = string | boolean | Record<string, unknown>[];
 
 interface MonitorFormProps {
   mode: "add" | "edit";
@@ -15,6 +18,9 @@ interface MonitorFormProps {
 }
 
 function initialFieldValue(field: Field, existing: unknown): FieldValue {
+  if (field.kind === "list") {
+    return Array.isArray(existing) ? (existing as Record<string, unknown>[]) : [];
+  }
   const raw = existing !== undefined ? existing : field.default;
   if (field.kind === "bool") return Boolean(raw);
   if (raw === null || raw === undefined) return "";
@@ -34,6 +40,17 @@ function buildInitialConfig(
 
 /** Coerces a raw form value to the JSON type its schema field declares. */
 function coerceFieldValue(field: Field, raw: FieldValue | undefined): unknown {
+  if (field.kind === "list") {
+    const rows = Array.isArray(raw) ? raw : [];
+    return rows.map((row) => {
+      const out: Record<string, unknown> = {};
+      for (const sf of field.fields ?? []) {
+        const c = coerceFieldValue(sf, row[sf.name] as FieldValue);
+        if (c !== null) out[sf.name] = c;
+      }
+      return out;
+    });
+  }
   if (field.kind === "bool") return Boolean(raw);
   const str = typeof raw === "string" ? raw.trim() : "";
   if (str === "") return null;
@@ -115,6 +132,10 @@ export function MonitorForm({ mode, monitor, onSubmit, onCancel }: MonitorFormPr
     const config: Record<string, unknown> = {};
     for (const field of fields) {
       const coerced = coerceFieldValue(field, configValues[field.name]);
+      if (field.kind === "list") {
+        config[field.name] = coerced; // always include (may be [])
+        continue;
+      }
       if (coerced !== null) {
         config[field.name] = coerced;
       }

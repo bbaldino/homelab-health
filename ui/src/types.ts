@@ -44,11 +44,13 @@ export interface MonitorStatus extends Monitor {
 /** One field in a check type's config schema. */
 export interface Field {
   name: string;
-  kind: "string" | "int" | "float" | "bool";
+  kind: "string" | "int" | "float" | "bool" | "list";
   required: boolean;
   default: unknown;
   help: string;
   secret: boolean;
+  options?: (string | number | boolean)[];
+  fields?: Field[];
 }
 
 /** The config schema advertised by a check type (e.g. "http", "tcp"). */
