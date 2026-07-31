@@ -841,18 +841,63 @@ body {
 .list-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
   align-items: flex-end;
-  margin-bottom: 0.5rem;
+  gap: 6px 10px;
+  padding: 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
 .list-row .form-field {
-  flex: 1 1 8rem;
+  flex: 1 1 9rem;
+  min-width: 0;
+  gap: 3px;
   margin: 0;
+}
+
+/* Dense rows: the per-field help text makes each column a different
+   height (misaligning the inputs) and adds clutter — drop it and shrink
+   the labels. The top-level list help still explains the section. */
+.list-row .field-help {
+  display: none;
+}
+
+.list-row .field-label,
+.list-row .form-field-checkbox .checkbox-label {
+  font-size: 0.72rem;
+}
+
+/* Size columns by content (not position, so any list works): the op
+   dropdown and the numeric threshold are short; let the text fields grow. */
+.list-row .form-field:has(select) {
+  flex: 0 1 5.5rem;
+}
+
+.list-row .form-field:has(input[type="number"]) {
+  flex: 0 1 7rem;
+}
+
+.list-row .form-field-checkbox {
+  flex: 0 0 auto;
+  align-self: center;
+  padding-bottom: 6px;
 }
 
 .list-row-remove {
   flex: 0 0 auto;
+  align-self: center;
+}
+
+/* "Fetch metrics" button + its status share one line. */
+.prometheus-inspect {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.inspect-status {
+  margin: 0;
 }
 
 .form-loading {
