@@ -2,7 +2,6 @@ use super::{CheckType, ConfigSchema, Field, FieldKind};
 use crate::report::{CheckReport, Component};
 use crate::status::Status;
 use async_trait::async_trait;
-#[allow(unused_imports)] // DateTime/Utc are used starting in Task 2
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -61,7 +60,6 @@ pub struct FieldRule {
 
 /// Traverse a dotted path (`a.b.c`) into a JSON object. Any non-object segment
 /// or missing key yields None.
-#[allow(dead_code)] // called starting in Task 3 (evaluate_field_rules)
 fn read_path<'a>(body: &'a Value, path: &str) -> Option<&'a Value> {
     let mut cur = body;
     for seg in path.split('.') {
@@ -219,6 +217,86 @@ impl CheckType for JsonHealthCheck {
     }
 }
 
+/// Human-friendly remaining/elapsed time for a timestamp rule's message.
+fn humanize_remaining(secs: f64) -> String {
+    let s = secs as i64;
+    let a = s.abs();
+    let (h, m) = (a / 3600, (a % 3600) / 60);
+    let mag = if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m")
+    } else {
+        format!("{a}s")
+    };
+    if s >= 0 {
+        format!("expires in {mag}")
+    } else {
+        format!("expired {mag} ago")
+    }
+}
+
+/// Pure: turn each field rule into one component (Unknown on any read/parse/
+/// config problem). `now` is injected so this is deterministic in tests.
+pub fn evaluate_field_rules(
+    body: &Value,
+    rules: &[FieldRule],
+    now: DateTime<Utc>,
+) -> Vec<Component> {
+    rules
+        .iter()
+        .map(|rule| {
+            let unknown =
+                |msg: String| Component::new(rule.name.clone(), Status::Unknown, true, msg);
+
+            if rule.degraded.is_none() && rule.critical.is_none() {
+                return unknown(format!("rule '{}' has no thresholds", rule.name));
+            }
+            let raw = match read_path(body, &rule.field) {
+                Some(v) => v,
+                None => return unknown(format!("field '{}' not found", rule.field)),
+            };
+
+            // interpret → (numeric value, message-friendly rendering)
+            let (value, render): (f64, String) = match rule.interpret {
+                Interpret::Timestamp => match raw
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                {
+                    Some(dt) => {
+                        let secs = (dt.with_timezone(&Utc) - now).num_seconds() as f64;
+                        (secs, humanize_remaining(secs))
+                    }
+                    None => {
+                        return unknown(format!(
+                            "field '{}' is not an RFC3339 timestamp",
+                            rule.field
+                        ));
+                    }
+                },
+                Interpret::Number => match raw.as_f64() {
+                    Some(n) => (n, format!("{n}")),
+                    None => return unknown(format!("field '{}' is not a number", rule.field)),
+                },
+            };
+
+            let breach = |threshold: Option<f64>| match (rule.op, threshold) {
+                (Op::Lt, Some(t)) => value < t,
+                (Op::Gt, Some(t)) => value > t,
+                (_, None) => false,
+            };
+            let status = if breach(rule.critical) {
+                Status::Critical
+            } else if breach(rule.degraded) {
+                Status::Degraded
+            } else {
+                Status::Ok
+            };
+            Component::new(rule.name.clone(), status, true, render)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +444,152 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(r.op, Op::Gt));
+    }
+
+    fn at(s: &str) -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn ts_rule(deg: f64, crit: f64) -> FieldRule {
+        FieldRule {
+            name: "tok".into(),
+            field: "exp".into(),
+            interpret: Interpret::Timestamp,
+            op: Op::Lt,
+            degraded: Some(deg),
+            critical: Some(crit),
+        }
+    }
+
+    #[test]
+    fn timestamp_far_out_is_ok() {
+        let now = at("2026-08-01T00:00:00Z");
+        let body = json!({ "exp": "2026-08-01T05:00:00Z" }); // 5h out
+        let c = evaluate_field_rules(&body, &[ts_rule(3600.0, 600.0)], now);
+        assert_eq!(c[0].status, Status::Ok);
+        assert!(c[0].critical);
+    }
+
+    #[test]
+    fn timestamp_within_degraded_and_critical() {
+        let now = at("2026-08-01T00:00:00Z");
+        let deg = json!({ "exp": "2026-08-01T00:30:00Z" }); // 30m out → < 3600
+        assert_eq!(
+            evaluate_field_rules(&deg, &[ts_rule(3600.0, 600.0)], now)[0].status,
+            Status::Degraded
+        );
+        let crit = json!({ "exp": "2026-08-01T00:05:00Z" }); // 5m out → < 600
+        assert_eq!(
+            evaluate_field_rules(&crit, &[ts_rule(3600.0, 600.0)], now)[0].status,
+            Status::Critical
+        );
+    }
+
+    #[test]
+    fn expired_timestamp_is_critical() {
+        let now = at("2026-08-01T00:00:00Z");
+        let body = json!({ "exp": "2026-07-31T23:59:00Z" }); // 1m ago
+        assert_eq!(
+            evaluate_field_rules(&body, &[ts_rule(3600.0, 600.0)], now)[0].status,
+            Status::Critical
+        );
+    }
+
+    #[test]
+    fn number_lt_and_gt() {
+        let now = at("2026-08-01T00:00:00Z");
+        let lt = FieldRule {
+            name: "n".into(),
+            field: "v".into(),
+            interpret: Interpret::Number,
+            op: Op::Lt,
+            degraded: Some(100.0),
+            critical: Some(10.0),
+        };
+        assert_eq!(
+            evaluate_field_rules(&json!({"v": 5}), std::slice::from_ref(&lt), now)[0].status,
+            Status::Critical
+        );
+        assert_eq!(
+            evaluate_field_rules(&json!({"v": 50}), std::slice::from_ref(&lt), now)[0].status,
+            Status::Degraded
+        );
+        assert_eq!(
+            evaluate_field_rules(&json!({"v": 500}), &[lt], now)[0].status,
+            Status::Ok
+        );
+        let gt = FieldRule {
+            name: "n".into(),
+            field: "v".into(),
+            interpret: Interpret::Number,
+            op: Op::Gt,
+            degraded: Some(80.0),
+            critical: Some(95.0),
+        };
+        assert_eq!(
+            evaluate_field_rules(&json!({"v": 99}), &[gt], now)[0].status,
+            Status::Critical
+        );
+    }
+
+    #[test]
+    fn warn_only_rule_never_criticals() {
+        let now = at("2026-08-01T00:00:00Z");
+        let r = FieldRule {
+            name: "tok".into(),
+            field: "exp".into(),
+            interpret: Interpret::Timestamp,
+            op: Op::Lt,
+            degraded: Some(3600.0),
+            critical: None,
+        };
+        let body = json!({ "exp": "2026-07-31T00:00:00Z" }); // long expired
+        assert_eq!(
+            evaluate_field_rules(&body, &[r], now)[0].status,
+            Status::Degraded
+        );
+    }
+
+    #[test]
+    fn missing_bad_and_no_threshold_are_unknown() {
+        let now = at("2026-08-01T00:00:00Z");
+        // missing field
+        assert_eq!(
+            evaluate_field_rules(&json!({}), &[ts_rule(3600.0, 600.0)], now)[0].status,
+            Status::Unknown
+        );
+        // timestamp interpret but not a valid timestamp
+        assert_eq!(
+            evaluate_field_rules(&json!({"exp": "nope"}), &[ts_rule(3600.0, 600.0)], now)[0].status,
+            Status::Unknown
+        );
+        // number interpret but not a number
+        let numr = FieldRule {
+            name: "n".into(),
+            field: "v".into(),
+            interpret: Interpret::Number,
+            op: Op::Lt,
+            degraded: Some(1.0),
+            critical: None,
+        };
+        assert_eq!(
+            evaluate_field_rules(&json!({"v": "x"}), &[numr], now)[0].status,
+            Status::Unknown
+        );
+        // no thresholds set
+        let none = FieldRule {
+            name: "n".into(),
+            field: "v".into(),
+            interpret: Interpret::Number,
+            op: Op::Lt,
+            degraded: None,
+            critical: None,
+        };
+        assert_eq!(
+            evaluate_field_rules(&json!({"v": 1}), &[none], now)[0].status,
+            Status::Unknown
+        );
     }
 }
