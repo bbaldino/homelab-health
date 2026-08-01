@@ -2,6 +2,8 @@ use super::{CheckType, ConfigSchema, Field, FieldKind};
 use crate::report::{CheckReport, Component};
 use crate::status::Status;
 use async_trait::async_trait;
+#[allow(unused_imports)] // DateTime/Utc are used starting in Task 2
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -12,10 +14,60 @@ struct JsonHealthConfig {
     url: String,
     #[serde(default = "default_timeout")]
     timeout_secs: u64,
+    #[serde(default)]
+    #[allow(dead_code)] // read starting in Task 3 (evaluate_field_rules)
+    field_rules: Vec<FieldRule>,
 }
 
 fn default_timeout() -> u64 {
     10
+}
+
+#[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Interpret {
+    Timestamp,
+    Number,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    #[serde(rename = "<")]
+    Lt,
+    #[serde(rename = ">")]
+    Gt,
+}
+
+#[allow(clippy::derivable_impls)] // kept as an explicit impl per spec
+impl Default for Op {
+    fn default() -> Self {
+        Op::Lt
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FieldRule {
+    pub name: String,
+    pub field: String,
+    pub interpret: Interpret,
+    #[serde(default)]
+    pub op: Op,
+    #[serde(default)]
+    pub degraded: Option<f64>,
+    #[serde(default)]
+    pub critical: Option<f64>,
+}
+
+/// Traverse a dotted path (`a.b.c`) into a JSON object. Any non-object segment
+/// or missing key yields None.
+#[allow(dead_code)] // called starting in Task 3 (evaluate_field_rules)
+fn read_path<'a>(body: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = body;
+    for seg in path.split('.') {
+        cur = cur.get(seg)?;
+    }
+    Some(cur)
 }
 
 /// A service's self-reported status: strictly ok/degraded/critical. A value
@@ -272,5 +324,47 @@ mod tests {
             .run(&json!({ "url": "http://x", "bogus": 1 }))
             .await;
         assert_eq!(report.status, Status::Unknown);
+    }
+
+    #[test]
+    fn read_path_top_level_and_nested_and_missing() {
+        let v = json!({ "a": 1, "b": { "c": "x" } });
+        assert_eq!(read_path(&v, "a"), Some(&json!(1)));
+        assert_eq!(read_path(&v, "b.c"), Some(&json!("x")));
+        assert_eq!(read_path(&v, "b.missing"), None);
+        assert_eq!(read_path(&v, "nope"), None);
+    }
+
+    #[test]
+    fn config_accepts_field_rules_with_defaults() {
+        let cfg: JsonHealthConfig = serde_json::from_value(json!({
+            "url": "http://x/health",
+            "field_rules": [
+                { "name": "tok", "field": "access_token_expires_at",
+                  "interpret": "timestamp", "degraded": 3600, "critical": 600 }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(cfg.field_rules.len(), 1);
+        let r = &cfg.field_rules[0];
+        assert!(matches!(r.interpret, Interpret::Timestamp));
+        assert!(matches!(r.op, Op::Lt)); // default
+        assert_eq!(r.critical, Some(600.0));
+    }
+
+    #[test]
+    fn config_still_rejects_unknown_and_defaults_empty_rules() {
+        let empty: JsonHealthConfig = serde_json::from_value(json!({ "url": "http://x" })).unwrap();
+        assert!(empty.field_rules.is_empty());
+        assert!(
+            serde_json::from_value::<JsonHealthConfig>(json!({ "url": "http://x", "bogus": 1 }))
+                .is_err()
+        );
+        // op parses the symbol form
+        let r: FieldRule = serde_json::from_value(json!({
+            "name": "n", "field": "f", "interpret": "number", "op": ">", "degraded": 80
+        }))
+        .unwrap();
+        assert!(matches!(r.op, Op::Gt));
     }
 }
