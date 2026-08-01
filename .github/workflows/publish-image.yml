@@ -14,19 +14,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo +nightly fmt --check
-      - run: cargo +stable clippy --all-targets --all-features -- -D warnings
-      - run: cargo +stable test --locked
+    uses: ./.github/workflows/test.yml
 
   publish:
     needs: test

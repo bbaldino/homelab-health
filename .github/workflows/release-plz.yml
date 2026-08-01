@@ -16,7 +16,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gate releases on the same suite publish-image runs, so a red main cannot
+  # tag/release. Without this, release-plz gated on nothing and a failing main
+  # still cut a tag + GitHub Release with no image behind it.
+  test:
+    uses: ./.github/workflows/test.yml
+
   release-plz:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
