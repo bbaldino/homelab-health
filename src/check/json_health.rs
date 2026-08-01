@@ -14,7 +14,6 @@ struct JsonHealthConfig {
     #[serde(default = "default_timeout")]
     timeout_secs: u64,
     #[serde(default)]
-    #[allow(dead_code)] // read starting in Task 3 (evaluate_field_rules)
     field_rules: Vec<FieldRule>,
 }
 
@@ -121,33 +120,52 @@ fn ensure_message(status: Status, message: String) -> String {
 }
 
 impl JsonHealthCheck {
-    /// Pure mapping from a parsed body to a CheckReport (hermetic-testable).
-    fn evaluate(body: HealthBody) -> CheckReport {
-        if !body.components.is_empty() {
-            let components = body
-                .components
-                .into_iter()
-                .map(|c| {
-                    let status = Status::from(c.status);
-                    Component::new(
-                        c.name,
-                        status,
-                        c.critical,
-                        ensure_message(status, c.message),
-                    )
-                })
-                .collect();
+    /// Pure mapping from a parsed body + field-rule components to a CheckReport.
+    fn evaluate(body: HealthBody, field_components: Vec<Component>) -> CheckReport {
+        let mut components: Vec<Component> = body
+            .components
+            .into_iter()
+            .map(|c| {
+                let status = Status::from(c.status);
+                Component::new(
+                    c.name,
+                    status,
+                    c.critical,
+                    ensure_message(status, c.message),
+                )
+            })
+            .collect();
+        let had_contract = !components.is_empty();
+        components.extend(field_components);
+
+        if had_contract {
+            // component-bearing body: roll everything up (body.status is derived)
             return CheckReport::from_components(components);
         }
-        match body.status {
-            Some(s) => {
-                let status = Status::from(s);
-                CheckReport::new(status, ensure_message(status, body.message))
+        if components.is_empty() {
+            // no contract components and no field rules → status-only behavior
+            return match body.status {
+                Some(s) => {
+                    let status = Status::from(s);
+                    CheckReport::new(status, ensure_message(status, body.message))
+                }
+                None => CheckReport::new(
+                    Status::Unknown,
+                    "health body had neither status nor components",
+                ),
+            };
+        }
+        // status-only body + field rules: worst of the two
+        let field = CheckReport::from_components(components);
+        let base = body.status.map(Status::from).unwrap_or(Status::Ok);
+        if base.rank() >= field.status.rank() {
+            CheckReport {
+                status: base,
+                message: ensure_message(base, body.message),
+                components: field.components,
             }
-            None => CheckReport::new(
-                Status::Unknown,
-                "health body had neither status nor components",
-            ),
+        } else {
+            field
         }
     }
 }
@@ -181,6 +199,77 @@ impl CheckType for JsonHealthCheck {
                     options: None,
                     fields: None,
                 },
+                Field {
+                    name: "field_rules",
+                    kind: FieldKind::List,
+                    required: false,
+                    default: None,
+                    help: "Threshold rules over fields in the JSON body",
+                    secret: false,
+                    options: None,
+                    fields: Some(vec![
+                        Field {
+                            name: "name",
+                            kind: FieldKind::String,
+                            required: true,
+                            default: None,
+                            help: "Component name",
+                            secret: false,
+                            options: None,
+                            fields: None,
+                        },
+                        Field {
+                            name: "field",
+                            kind: FieldKind::String,
+                            required: true,
+                            default: None,
+                            help: "JSON field path, e.g. access_token_expires_at (dotted for nested)",
+                            secret: false,
+                            options: None,
+                            fields: None,
+                        },
+                        Field {
+                            name: "interpret",
+                            kind: FieldKind::String,
+                            required: true,
+                            default: None,
+                            help: "How to read the field",
+                            secret: false,
+                            options: Some(vec![json!("timestamp"), json!("number")]),
+                            fields: None,
+                        },
+                        Field {
+                            name: "op",
+                            kind: FieldKind::String,
+                            required: false,
+                            default: Some(json!("<")),
+                            help: "Comparison (worse when value crosses the threshold)",
+                            secret: false,
+                            options: Some(vec![json!("<"), json!(">")]),
+                            fields: None,
+                        },
+                        Field {
+                            name: "degraded",
+                            kind: FieldKind::Float,
+                            required: false,
+                            default: None,
+                            help: "Degraded threshold (for timestamp: seconds remaining, e.g. 3600 = 1h)",
+                            secret: false,
+                            options: None,
+                            fields: None,
+                        },
+                        Field {
+                            name: "critical",
+                            kind: FieldKind::Float,
+                            required: false,
+                            default: None,
+                            help: "Critical threshold (for timestamp: seconds remaining, e.g. 600 = 10m)",
+                            secret: false,
+                            options: None,
+                            fields: None,
+                        },
+                    ]),
+                },
             ],
         }
     }
@@ -204,16 +293,25 @@ impl CheckType for JsonHealthCheck {
             Err(e) => return CheckReport::new(Status::Unknown, format!("request failed: {e}")),
         };
 
-        // Parse the body regardless of HTTP status code (a 503-on-critical
-        // service still has a readable body per the health contract).
-        let body: HealthBody = match resp.json().await {
+        // Parse once as a raw Value so field rules can read arbitrary fields,
+        // then map the contract shape from it. Parse regardless of HTTP status
+        // (a 503-on-critical service still has a readable body per the health
+        // contract).
+        let value: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                return CheckReport::new(Status::Unknown, format!("invalid health body: {e}"));
+            }
+        };
+        let body: HealthBody = match serde_json::from_value(value.clone()) {
             Ok(b) => b,
             Err(e) => {
                 return CheckReport::new(Status::Unknown, format!("invalid health body: {e}"));
             }
         };
 
-        JsonHealthCheck::evaluate(body)
+        let field_components = evaluate_field_rules(&value, &cfg.field_rules, chrono::Utc::now());
+        JsonHealthCheck::evaluate(body, field_components)
     }
 }
 
@@ -309,34 +407,40 @@ mod tests {
 
     #[test]
     fn critical_critical_component_makes_report_critical() {
-        let report = JsonHealthCheck::evaluate(parse(json!({
-            "components": [
-                { "name": "database", "status": "critical", "critical": true, "message": "conn refused" }
-            ]
-        })));
+        let report = JsonHealthCheck::evaluate(
+            parse(json!({
+                "components": [
+                    { "name": "database", "status": "critical", "critical": true, "message": "conn refused" }
+                ]
+            })),
+            vec![],
+        );
         assert_eq!(report.status, Status::Critical);
         assert!(report.message.contains("database"));
     }
 
     #[test]
     fn noncritical_critical_component_caps_at_degraded() {
-        let report = JsonHealthCheck::evaluate(parse(json!({
-            "components": [
-                { "name": "spotify", "status": "critical", "critical": false, "message": "token refresh failing" }
-            ]
-        })));
+        let report = JsonHealthCheck::evaluate(
+            parse(json!({
+                "components": [
+                    { "name": "spotify", "status": "critical", "critical": false, "message": "token refresh failing" }
+                ]
+            })),
+            vec![],
+        );
         assert_eq!(report.status, Status::Degraded);
     }
 
     #[test]
     fn status_only_no_components() {
-        let report = JsonHealthCheck::evaluate(parse(json!({ "status": "ok" })));
+        let report = JsonHealthCheck::evaluate(parse(json!({ "status": "ok" })), vec![]);
         assert_eq!(report.status, Status::Ok);
     }
 
     #[test]
     fn empty_body_is_unknown() {
-        let report = JsonHealthCheck::evaluate(parse(json!({})));
+        let report = JsonHealthCheck::evaluate(parse(json!({})), vec![]);
         assert_eq!(report.status, Status::Unknown);
     }
 
@@ -344,9 +448,12 @@ mod tests {
     fn non_ok_component_missing_message_gets_fallback() {
         // Service violates the contract by omitting message on a non-ok component;
         // we must not panic (Component::new debug-asserts non-empty message).
-        let report = JsonHealthCheck::evaluate(parse(json!({
-            "components": [ { "name": "x", "status": "critical", "critical": true } ]
-        })));
+        let report = JsonHealthCheck::evaluate(
+            parse(json!({
+                "components": [ { "name": "x", "status": "critical", "critical": true } ]
+            })),
+            vec![],
+        );
         assert_eq!(report.status, Status::Critical);
         assert_eq!(report.components[0].message, "Critical");
     }
@@ -402,6 +509,73 @@ mod tests {
             .run(&json!({ "url": "http://x", "bogus": 1 }))
             .await;
         assert_eq!(report.status, Status::Unknown);
+    }
+
+    #[tokio::test]
+    async fn run_appends_field_rule_component() {
+        let exp = (chrono::Utc::now() + chrono::Duration::minutes(20)).to_rfc3339();
+        let body = json!({
+            "status": "ok", "message": "",
+            "components": [{ "name": "credentials", "status": "ok", "critical": true, "message": "" }],
+            "access_token_expires_at": exp
+        })
+        .to_string();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let report = JsonHealthCheck
+            .run(&json!({
+                "url": server.uri(),
+                "field_rules": [{ "name": "access_token", "field": "access_token_expires_at",
+                    "interpret": "timestamp", "degraded": 3600, "critical": 600 }]
+            }))
+            .await;
+        assert_eq!(report.status, Status::Degraded);
+        assert!(
+            report
+                .components
+                .iter()
+                .any(|c| c.name == "access_token" && c.status == Status::Degraded)
+        );
+        assert!(report.components.iter().any(|c| c.name == "credentials"));
+    }
+
+    #[tokio::test]
+    async fn run_far_off_token_stays_ok() {
+        let exp = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
+        let body =
+            json!({ "status": "ok", "components": [], "access_token_expires_at": exp }).to_string();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let report = JsonHealthCheck
+            .run(&json!({
+                "url": server.uri(),
+                "field_rules": [{ "name": "access_token", "field": "access_token_expires_at",
+                    "interpret": "timestamp", "degraded": 3600, "critical": 600 }]
+            }))
+            .await;
+        assert_eq!(report.status, Status::Ok);
+    }
+
+    #[test]
+    fn schema_exposes_field_rules_list() {
+        let s = JsonHealthCheck.schema();
+        let fr = s.fields.iter().find(|f| f.name == "field_rules").unwrap();
+        assert!(matches!(fr.kind, FieldKind::List));
+        let sub = fr.fields.as_ref().unwrap();
+        let interp = sub.iter().find(|f| f.name == "interpret").unwrap();
+        assert!(
+            interp
+                .options
+                .as_ref()
+                .unwrap()
+                .contains(&json!("timestamp"))
+        );
     }
 
     #[test]
