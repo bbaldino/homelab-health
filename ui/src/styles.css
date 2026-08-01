@@ -691,6 +691,12 @@ body {
   overflow: hidden;
 }
 
+/* Widen only when the form carries a repeatable list (e.g. the prometheus
+   rule builder) so a rule fits on one row; simple forms stay compact. */
+.modal:has(.list-field) {
+  max-width: 760px;
+}
+
 .modal:focus-visible,
 .modal:focus {
   outline: none;
