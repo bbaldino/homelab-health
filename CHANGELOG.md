@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/bbaldino/homelab-health/compare/v0.2.3...v0.2.4) - 2026-08-01
+
+### Added
+
+- json-health evaluates field rules and appends their components
+- evaluate_field_rules for json-health
+- json-health field-rule config types and path reader
+
+### Other
+
+- json-health field rules implementation plan
+- json-health field rules design spec
+- only cut releases for feat and fix commits
+
 ## [0.2.3](https://github.com/bbaldino/homelab-health/compare/v0.2.2...v0.2.3) - 2026-08-01
 
 ### Other
