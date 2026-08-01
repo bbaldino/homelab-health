@@ -1,12 +1,10 @@
 # Health Endpoint Contract (v1)
 
 How a custom service should expose its health so the homelab health monitor can
-consume it. This maps 1:1 onto the monitor's internal model, so a future
-`json-health` check plugin can ingest it without translation.
-
-> Note: the v1 `http` check inspects only the HTTP **status code**. Parsing the
-> body described here requires the `json-health` check type (planned, not yet
-> built). Implement this contract now so services are ready when it lands.
+consume it via its **`json-health`** check. This maps 1:1 onto the monitor's
+internal model, so `json-health` ingests it without translation. (The simpler
+`http` check inspects only the HTTP **status code**, not the body — this
+contract is for services that want to report structured health in JSON.)
 
 ## Endpoint
 
@@ -63,6 +61,46 @@ Match these so your top-level `status` agrees with the monitor's:
 - A failing **non-critical** component caps the service at **`degraded`** — it
   can never make the service `critical`.
 - Service status = the worst effective status across components.
+
+## Telemetry (raw fields the monitor interprets)
+
+`status`, `message`, and `components` are **verdicts** — the service's own
+`ok`/`degraded`/`critical` judgments. A service may *also* expose **raw
+telemetry**: observable facts it deliberately does not judge (a timestamp, a
+count, a ratio). Those three verdict fields are reserved; **any other top-level
+field is fair game for telemetry.**
+
+The monitor turns telemetry into health via the `json-health` check's **field
+rules**: a rule reads a field by (dotted) path, interprets it as a `timestamp`
+(→ seconds remaining) or a `number`, and applies `degraded` / `critical`
+thresholds, producing a component that rolls up like any other. The thresholds
+live in the **monitor** (tunable centrally), not in the service.
+
+- **Verdict or telemetry?** If the service knows how to judge something, report
+  it as a **component**. If it's a fact whose "healthy range" is a policy you'd
+  rather set — and re-tune — centrally, expose it as **telemetry** and let a
+  field rule decide. Both are fine; pick by where the judgment belongs.
+- **Prefer absolute values.** Expose an absolute timestamp (e.g.
+  `..._expires_at` in RFC3339) rather than a pre-computed countdown — the
+  monitor computes "time remaining" itself, so nothing goes stale between polls.
+- Telemetry field **names are part of your contract** with the monitor's rules;
+  keep them stable, and don't shadow a reserved field (`status`/`message`/
+  `components`).
+
+Example — a service exposing token expiry as telemetry:
+```json
+{
+  "status": "ok",
+  "components": [
+    { "name": "credentials", "status": "ok", "critical": true, "message": "" }
+  ],
+  "access_token_expires_at": "2026-08-01T18:53:11Z"
+}
+```
+A `json-health` field rule (`field: access_token_expires_at`, `interpret:
+timestamp`, `degraded: 3600`, `critical: 600`) adds an `access_token` component
+that goes **degraded** within 1h of expiry and **critical** within 10m — the
+service reports only the fact; the monitor makes the call.
 
 ## HTTP status code
 
