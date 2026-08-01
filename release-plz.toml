@@ -15,3 +15,10 @@ git_release_enable = true
 
 # The tag format publish-image.yml matches on: v*.*.*
 git_tag_name = "v{{version}}"
+
+# Only feat/fix cut a release. Without this, release-plz bumps on ANY
+# conventional commit — docs/ci/chore all cut versions and rebuild the image.
+# The character class also catches `feat(scope):` and `feat!:`.
+# (NB: this is release_commits, not commit_parsers — the latter is a changelog
+# field with no effect on whether a release happens.)
+release_commits = "^(feat|fix)[(!:]"
