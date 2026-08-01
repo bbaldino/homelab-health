@@ -123,7 +123,7 @@ impl Scheduler {
                         let interval = Duration::from_secs(monitor.interval_secs.max(1) as u64);
                         let due = last_run
                             .get(&monitor.id)
-                            .map_or(true, |t| now.duration_since(*t) >= interval);
+                            .is_none_or(|t| now.duration_since(*t) >= interval);
                         if due {
                             last_run.insert(monitor.id, now);
                             if let Err(e) = self.run_and_record(monitor).await {
