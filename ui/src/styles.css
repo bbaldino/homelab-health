@@ -464,6 +464,7 @@ body {
 }
 
 .uptime-section,
+.incidents-section,
 .history-section {
   display: flex;
   flex-direction: column;
@@ -605,19 +606,170 @@ body {
   font-size: 0.82rem;
 }
 
+/* Incidents: the card badge, the cross-monitor feed, and the shared rows */
+
+/* Deliberately quieter than a status dot's own color: the monitor is green
+   *now*, and this is a record of past trouble, not an active alarm. */
+.incident-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-muted);
+  background: var(--degraded-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+.incident-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.incident-feed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.incident-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.incident-summary {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.incident-summary:hover {
+  background: var(--surface-hover);
+}
+
+.incident-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.incident-time {
+  flex: none;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  min-width: 132px;
+}
+
+.incident-monitor {
+  flex: none;
+  font-weight: 600;
+}
+
+.incident-duration {
+  flex: none;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* An unresolved incident is the one thing here that *is* an active alarm. */
+.incident-ongoing {
+  color: var(--critical);
+  background: var(--critical-bg);
+  border-color: var(--critical);
+}
+
+.incident-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.incident-components {
+  padding: 2px 6px 8px 30px;
+}
+
+.failing-component-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.failing-component-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+}
+
+.failing-component-item .component-message {
+  flex: 1 1 auto;
+}
+
+.failing-component-seen {
+  flex: none;
+  font-size: 0.7rem;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 480px) {
-  .history-time {
+  .history-time,
+  .incident-time {
     min-width: 0;
   }
 
-  .history-item {
+  .history-item,
+  .incident-summary {
     flex-wrap: wrap;
   }
 
-  .history-message {
+  .history-message,
+  .incident-message {
     order: 3;
     white-space: normal;
     flex-basis: 100%;
+  }
+
+  .incident-components {
+    padding-left: 12px;
+  }
+
+  .failing-component-item {
+    flex-wrap: wrap;
   }
 }
 

@@ -1,6 +1,7 @@
 import type {
   CheckReport,
   CheckTypeSchema,
+  IncidentDetail,
   Monitor,
   MonitorStatus,
   NewMonitor,
@@ -36,6 +37,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     return undefined as T;
   }
   return (await res.json()) as T;
+}
+
+/** Filters for GET /incidents; `since`/`until` are unix epoch-seconds. */
+export interface IncidentQuery {
+  since?: number;
+  until?: number;
+  monitorId?: number;
+  limit?: number;
 }
 
 /** Typed client for the homelab-health JSON API. */
@@ -77,6 +86,20 @@ export class ApiClient {
 
   getUptime(id: number, windowSecs: number): Promise<Uptime> {
     return request<Uptime>(`/monitors/${id}/uptime?window=${windowSecs}`);
+  }
+
+  /**
+   * Incidents newest first. Every parameter is optional: the server defaults
+   * to the last 7 days, all monitors, and a limit of 50.
+   */
+  getIncidents(params: IncidentQuery = {}): Promise<IncidentDetail[]> {
+    const query = new URLSearchParams();
+    if (params.since !== undefined) query.set("since", String(params.since));
+    if (params.until !== undefined) query.set("until", String(params.until));
+    if (params.monitorId !== undefined) query.set("monitor_id", String(params.monitorId));
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    const qs = query.toString();
+    return request<IncidentDetail[]>(`/incidents${qs ? `?${qs}` : ""}`);
   }
 
   inspectPrometheus(url: string, timeoutSecs?: number): Promise<PrometheusInspect> {

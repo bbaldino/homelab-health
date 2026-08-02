@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { api } from "./api";
 import type { MonitorStatus, NewMonitor, Status } from "./types";
 import { StatusBoard } from "./components/StatusBoard";
+import { IncidentFeed } from "./components/IncidentFeed";
 import { Modal } from "./components/Modal";
 import { MonitorForm } from "./components/MonitorForm";
 
@@ -31,6 +32,7 @@ export function App() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
   const [modalState, setModalState] = useState<ModalState | null>(null);
+  const [feedOpen, setFeedOpen] = useState(false);
 
   async function refresh() {
     try {
@@ -76,6 +78,12 @@ export function App() {
   }
 
   const counts = countByStatus(monitors);
+  // From the inline /status payload, so the toggle can advertise trouble
+  // without the feed itself having been opened. 24h, capped per monitor.
+  const recentIncidentCount = monitors.reduce(
+    (total, m) => total + m.recent_incidents.length,
+    0,
+  );
 
   return (
     <div class="app">
@@ -86,6 +94,15 @@ export function App() {
             <span class="refresh-hint" title="Status is polled automatically">
               auto-refreshing every 10s
             </span>
+            <button
+              type="button"
+              class="btn btn-secondary"
+              aria-expanded={feedOpen}
+              onClick={() => setFeedOpen((v) => !v)}
+            >
+              {feedOpen ? "Hide incidents" : "Recent incidents"}
+              {recentIncidentCount > 0 && ` (${recentIncidentCount})`}
+            </button>
             <button
               type="button"
               class="btn btn-primary"
@@ -118,6 +135,7 @@ export function App() {
 
       <main>
         {error && <div class="error-banner">Failed to load status: {error}</div>}
+        {feedOpen && <IncidentFeed />}
         {loading && monitors.length === 0 && !error && (
           <div class="empty-state">Loading…</div>
         )}
