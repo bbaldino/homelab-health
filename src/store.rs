@@ -1,10 +1,23 @@
+use crate::incident::{
+    FailingComponent, Incident, IncidentDetail, RECENT_LIMIT, RECENT_WINDOW_SECS, compute_incidents,
+};
 use crate::report::{CheckReport, Component};
 use crate::status::Status;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Wall clock as epoch seconds — the unit every `at` column is stored in.
+pub fn now_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct NewMonitor {
@@ -38,6 +51,21 @@ pub struct MonitorStatus {
     pub message: Option<String>,
     pub components: Vec<Component>,
     pub updated_at: Option<String>,
+    /// Incidents overlapping the last 24h, newest 5, without
+    /// `failing_components` — enough to render "green, but 2 incidents
+    /// overnight" without a second request, and cheap enough for a polling
+    /// dashboard.
+    pub recent_incidents: Vec<Incident>,
+}
+
+/// One row of `status_transitions`. Uptime only needs `(status, at)` and
+/// ignores the message, but incidents need it for their rollup line — one
+/// representation of a transition row, not two.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransitionRow {
+    pub status: Status,
+    pub message: String,
+    pub at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +91,15 @@ fn row_to_monitor(row: SqliteRow) -> Result<Monitor, sqlx::Error> {
         interval_secs: row.try_get("interval_secs")?,
         enabled: row.try_get::<i64, _>("enabled")? != 0,
     })
+}
+
+fn row_to_transition(row: SqliteRow) -> TransitionRow {
+    let status: String = row.try_get("status").unwrap_or_default();
+    TransitionRow {
+        status: Status::from_db(&status),
+        message: row.try_get("message").unwrap_or_default(),
+        at: row.try_get("at").unwrap_or_default(),
+    }
 }
 
 impl Store {
@@ -291,37 +328,257 @@ impl Store {
         &self,
         monitor_id: i64,
         since: i64,
-    ) -> Result<Vec<(Status, i64)>, sqlx::Error> {
+    ) -> Result<Vec<TransitionRow>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT status, at FROM status_transitions
+            "SELECT status, message, at FROM status_transitions
              WHERE monitor_id = ?1 AND at > ?2 ORDER BY at ASC, id ASC",
         )
         .bind(monitor_id)
         .bind(since)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                let s: String = r.try_get("status").unwrap_or_default();
-                (Status::from_db(&s), r.try_get("at").unwrap_or_default())
-            })
-            .collect())
+        Ok(rows.into_iter().map(row_to_transition).collect())
     }
 
-    pub async fn status_at(&self, monitor_id: i64, at: i64) -> Result<Option<Status>, sqlx::Error> {
+    /// The last transition at or before `at` — the monitor's committed status
+    /// going into a window, plus when that status actually started. `None`
+    /// means nothing was ever recorded at or before `at`: status is unknown by
+    /// absence, which incidents and uptime treat differently.
+    pub async fn last_transition_at_or_before(
+        &self,
+        monitor_id: i64,
+        at: i64,
+    ) -> Result<Option<TransitionRow>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT status FROM status_transitions
+            "SELECT status, message, at FROM status_transitions
              WHERE monitor_id = ?1 AND at <= ?2 ORDER BY at DESC, id DESC LIMIT 1",
         )
         .bind(monitor_id)
         .bind(at)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| {
-            let s: String = r.try_get("status").unwrap_or_default();
-            Status::from_db(&s)
-        }))
+        Ok(row.map(row_to_transition))
+    }
+
+    /// Batched `get_transitions_since` across every monitor. The `/status`
+    /// polling path is already N+1 on `status_current`; incidents must not add
+    /// to it, so both transition reads happen once for the whole board.
+    pub async fn transitions_since_all(
+        &self,
+        since: i64,
+    ) -> Result<HashMap<i64, Vec<TransitionRow>>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT monitor_id, status, message, at FROM status_transitions
+             WHERE at > ?1 ORDER BY monitor_id ASC, at ASC, id ASC",
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out: HashMap<i64, Vec<TransitionRow>> = HashMap::new();
+        for r in rows {
+            let monitor_id: i64 = r.try_get("monitor_id").unwrap_or_default();
+            out.entry(monitor_id)
+                .or_default()
+                .push(row_to_transition(r));
+        }
+        Ok(out)
+    }
+
+    /// Batched `last_transition_at_or_before` across every monitor.
+    pub async fn last_transition_at_or_before_all(
+        &self,
+        at: i64,
+    ) -> Result<HashMap<i64, TransitionRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT monitor_id, status, message, at FROM (
+                 SELECT monitor_id, status, message, at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY monitor_id ORDER BY at DESC, id DESC
+                        ) AS rn
+                 FROM status_transitions WHERE at <= ?1
+             ) WHERE rn = 1",
+        )
+        .bind(at)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let monitor_id: i64 = r.try_get("monitor_id").unwrap_or_default();
+                (monitor_id, row_to_transition(r))
+            })
+            .collect())
+    }
+
+    /// Components that were non-Ok at any point in `[start, end]`, folded per
+    /// name across every sample in the span. A snapshot from a single sample
+    /// would tell half the story: components fail at different moments.
+    ///
+    /// Samples are pruned after 7 days while transitions are kept forever, so
+    /// an old incident legitimately yields `[]` — timing, `worst_status` and
+    /// `message` survive without it.
+    pub async fn failing_components_for(
+        &self,
+        monitor_id: i64,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<FailingComponent>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT components_json, at FROM check_samples
+             WHERE monitor_id = ?1 AND at >= ?2 AND at <= ?3 ORDER BY at ASC, id ASC",
+        )
+        .bind(monitor_id)
+        .bind(start)
+        .bind(end)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut folded: HashMap<String, FailingComponent> = HashMap::new();
+        for r in rows {
+            let at: i64 = r.try_get("at").unwrap_or_default();
+            let components_str: String = r.try_get("components_json").unwrap_or_default();
+            let components: Vec<Component> =
+                serde_json::from_str(&components_str).unwrap_or_default();
+            for c in components.into_iter().filter(|c| c.status != Status::Ok) {
+                match folded.get_mut(&c.name) {
+                    Some(f) => {
+                        // Only a strictly worse status takes over the message,
+                        // so earlier wins on ties.
+                        if c.status.rank() > f.worst_status.rank() {
+                            f.worst_status = c.status;
+                            f.critical = c.critical;
+                            f.message = c.message;
+                        }
+                        f.last_seen = at;
+                    }
+                    None => {
+                        folded.insert(
+                            c.name.clone(),
+                            FailingComponent {
+                                name: c.name,
+                                worst_status: c.status,
+                                critical: c.critical,
+                                message: c.message,
+                                first_seen: at,
+                                last_seen: at,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // Worst first, then by when trouble started — a stable order that puts
+        // the component that explains the incident at the top.
+        let mut out: Vec<FailingComponent> = folded.into_values().collect();
+        out.sort_by(|a, b| {
+            b.worst_status
+                .rank()
+                .cmp(&a.worst_status.rank())
+                .then(a.first_seen.cmp(&b.first_seen))
+                .then(a.name.cmp(&b.name))
+        });
+        Ok(out)
+    }
+
+    /// Incidents across monitors overlapping `[since, until]`, newest first.
+    ///
+    /// Transitions are read all the way to now rather than to `until`, so an
+    /// incident that recovered after the requested range still reports its real
+    /// `ended_at`: incidents overlapping the range are returned whole, because
+    /// truncating one at a query boundary would misreport its duration.
+    pub async fn list_incidents(
+        &self,
+        since: i64,
+        until: i64,
+        monitor_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<IncidentDetail>, sqlx::Error> {
+        let monitors = match monitor_id {
+            // An unknown id is an empty result, not a 404: it is a filter, not
+            // a path segment.
+            Some(id) => self.get_monitor(id).await?.into_iter().collect(),
+            None => self.list_monitors().await?,
+        };
+        let now = now_epoch();
+        let mut priors = self.last_transition_at_or_before_all(since).await?;
+        let mut transitions = self.transitions_since_all(since).await?;
+
+        let mut out = Vec::new();
+        for monitor in monitors {
+            let rows = transitions.remove(&monitor.id).unwrap_or_default();
+            let prior = priors.remove(&monitor.id);
+            for incident in compute_incidents(prior.as_ref(), &rows, now) {
+                if incident.started_at > until {
+                    continue;
+                }
+                let end = incident.ended_at.unwrap_or(now);
+                let failing_components = self
+                    .failing_components_for(monitor.id, incident.started_at, end)
+                    .await?;
+                out.push(IncidentDetail {
+                    monitor_id: monitor.id,
+                    monitor_name: monitor.name.clone(),
+                    incident,
+                    failing_components,
+                });
+            }
+        }
+
+        out.sort_by(|a, b| {
+            b.incident
+                .started_at
+                .cmp(&a.incident.started_at)
+                .then(a.monitor_id.cmp(&b.monitor_id))
+        });
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    /// Seed a sample (components and all) at an exact epoch second, so tests can
+    /// lay out an incident's timeline without sleeping.
+    #[cfg(test)]
+    pub(crate) async fn insert_sample_with_components_at(
+        &self,
+        monitor_id: i64,
+        report: &CheckReport,
+        at: i64,
+    ) {
+        let components = serde_json::to_string(&report.components).unwrap();
+        sqlx::query(
+            "INSERT INTO check_samples (monitor_id, status, message, components_json, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(monitor_id)
+        .bind(report.status.as_str())
+        .bind(&report.message)
+        .bind(components)
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+    }
+
+    /// Seed a transition at an exact epoch second.
+    #[cfg(test)]
+    pub(crate) async fn insert_transition_at(
+        &self,
+        monitor_id: i64,
+        status: Status,
+        message: &str,
+        at: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO status_transitions (monitor_id, status, message, at)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(monitor_id)
+        .bind(status.as_str())
+        .bind(message)
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .unwrap();
     }
 
     #[cfg(test)]
@@ -357,13 +614,29 @@ impl Store {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(Some(build_status(monitor, row)))
+        let mut status = build_status(monitor, row);
+        let now = now_epoch();
+        let window_start = now - RECENT_WINDOW_SECS;
+        let prior = self.last_transition_at_or_before(id, window_start).await?;
+        let transitions = self.get_transitions_since(id, window_start).await?;
+        status.recent_incidents = compute_incidents(prior.as_ref(), &transitions, now);
+        status.recent_incidents.truncate(RECENT_LIMIT);
+        Ok(Some(status))
     }
 
     pub async fn list_status(&self) -> Result<Vec<MonitorStatus>, sqlx::Error> {
         let monitors = self.list_monitors().await?;
+        let now = now_epoch();
+        let window_start = now - RECENT_WINDOW_SECS;
+        // Two batched reads for the whole board, not two per monitor: this is
+        // the path a dashboard polls every 60s.
+        let mut priors = self.last_transition_at_or_before_all(window_start).await?;
+        let mut transitions = self.transitions_since_all(window_start).await?;
+
         let mut out = Vec::with_capacity(monitors.len());
         for monitor in monitors {
+            let rows = transitions.remove(&monitor.id).unwrap_or_default();
+            let prior = priors.remove(&monitor.id);
             let row = sqlx::query(
                 "SELECT status, message, components_json, updated_at
                  FROM status_current WHERE monitor_id = ?1",
@@ -371,7 +644,10 @@ impl Store {
             .bind(monitor.id)
             .fetch_optional(&self.pool)
             .await?;
-            out.push(build_status(monitor, row));
+            let mut status = build_status(monitor, row);
+            status.recent_incidents = compute_incidents(prior.as_ref(), &rows, now);
+            status.recent_incidents.truncate(RECENT_LIMIT);
+            out.push(status);
         }
         Ok(out)
     }
@@ -385,6 +661,7 @@ fn build_status(monitor: Monitor, row: Option<SqliteRow>) -> MonitorStatus {
             message: None,
             components: Vec::new(),
             updated_at: None,
+            recent_incidents: Vec::new(),
         },
         Some(r) => {
             let status_str: String = r.try_get("status").unwrap_or_default();
@@ -401,6 +678,7 @@ fn build_status(monitor: Monitor, row: Option<SqliteRow>) -> MonitorStatus {
                 message,
                 components,
                 updated_at,
+                recent_incidents: Vec::new(),
             }
         }
     }
@@ -600,10 +878,16 @@ mod tests {
             .unwrap();
         let since = s.get_transitions_since(m.id, 0).await.unwrap();
         assert_eq!(since.len(), 2);
-        assert_eq!(since[0].0, Status::Ok); // ascending
-        // status_at "now+large" should be the latest (Critical)
-        let at_now = s.status_at(m.id, 9_999_999_999).await.unwrap();
-        assert_eq!(at_now, Some(Status::Critical));
+        assert_eq!(since[0].status, Status::Ok); // ascending
+        assert_eq!(since[0].message, "up");
+        // "now+large" should find the latest transition (Critical)
+        let at_now = s
+            .last_transition_at_or_before(m.id, 9_999_999_999)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(at_now.status, Status::Critical);
+        assert_eq!(at_now.message, "down");
     }
 
     #[tokio::test]
@@ -618,6 +902,188 @@ mod tests {
         let deleted = s.prune_samples(7).await.unwrap();
         assert_eq!(deleted, 1);
         assert_eq!(s.get_samples(m.id, 10).await.unwrap().len(), 1);
+    }
+
+    fn report_with(components: Vec<Component>) -> CheckReport {
+        CheckReport::from_components(components)
+    }
+
+    #[tokio::test]
+    async fn failing_components_folds_across_samples() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        // disk3 is down from the start; cache free space only blips later, and
+        // escalates while it is failing. An ok component is never reported.
+        s.insert_sample_with_components_at(
+            m.id,
+            &report_with(vec![
+                Component::new("disk3", Status::Critical, true, "SMART: FAILING_NOW"),
+                Component::new("cache free space", Status::Ok, false, ""),
+            ]),
+            100,
+        )
+        .await;
+        s.insert_sample_with_components_at(
+            m.id,
+            &report_with(vec![
+                Component::new("disk3", Status::Critical, true, "SMART: FAILING_NOW"),
+                Component::new("cache free space", Status::Degraded, false, "9% free"),
+            ]),
+            200,
+        )
+        .await;
+        s.insert_sample_with_components_at(
+            m.id,
+            &report_with(vec![
+                Component::new("disk3", Status::Ok, true, ""),
+                Component::new("cache free space", Status::Degraded, false, "4% free"),
+            ]),
+            300,
+        )
+        .await;
+
+        let fc = s.failing_components_for(m.id, 100, 300).await.unwrap();
+        assert_eq!(fc.len(), 2);
+        // worst first
+        assert_eq!(fc[0].name, "disk3");
+        assert_eq!(fc[0].worst_status, Status::Critical);
+        assert!(fc[0].critical);
+        assert_eq!(fc[0].message, "SMART: FAILING_NOW");
+        assert_eq!(fc[0].first_seen, 100);
+        // disk3 recovered at 300, so it was last seen failing at 200.
+        assert_eq!(fc[0].last_seen, 200);
+
+        assert_eq!(fc[1].name, "cache free space");
+        assert_eq!(fc[1].worst_status, Status::Degraded);
+        assert!(!fc[1].critical);
+        // Degraded twice: earlier message wins on a severity tie.
+        assert_eq!(fc[1].message, "9% free");
+        assert_eq!(fc[1].first_seen, 200);
+        assert_eq!(fc[1].last_seen, 300);
+    }
+
+    #[tokio::test]
+    async fn failing_components_escalation_takes_the_worse_message() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        s.insert_sample_with_components_at(
+            m.id,
+            &report_with(vec![Component::new("db", Status::Degraded, true, "slow")]),
+            100,
+        )
+        .await;
+        s.insert_sample_with_components_at(
+            m.id,
+            &report_with(vec![Component::new("db", Status::Critical, true, "gone")]),
+            200,
+        )
+        .await;
+        let fc = s.failing_components_for(m.id, 100, 200).await.unwrap();
+        assert_eq!(fc.len(), 1);
+        assert_eq!(fc[0].worst_status, Status::Critical);
+        assert_eq!(fc[0].message, "gone");
+        assert_eq!(fc[0].first_seen, 100);
+        assert_eq!(fc[0].last_seen, 200);
+    }
+
+    #[tokio::test]
+    async fn failing_components_is_empty_when_samples_are_pruned() {
+        // Samples live 7 days, transitions forever. An old incident degrades
+        // gracefully to no component detail rather than erroring.
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let fc = s.failing_components_for(m.id, 100, 300).await.unwrap();
+        assert!(fc.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_incidents_attaches_monitor_and_components() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let now = now_epoch();
+        s.insert_transition_at(m.id, Status::Ok, "up", now - 7200)
+            .await;
+        s.insert_transition_at(
+            m.id,
+            Status::Critical,
+            "2 of 8 components unhealthy",
+            now - 3600,
+        )
+        .await;
+        s.insert_transition_at(m.id, Status::Ok, "recovered", now - 1800)
+            .await;
+        s.insert_sample_with_components_at(
+            m.id,
+            &report_with(vec![Component::new(
+                "disk3",
+                Status::Critical,
+                true,
+                "SMART",
+            )]),
+            now - 3000,
+        )
+        .await;
+
+        let incidents = s.list_incidents(now - 86_400, now, None, 50).await.unwrap();
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].monitor_id, m.id);
+        assert_eq!(incidents[0].monitor_name, "Plex");
+        assert_eq!(incidents[0].incident.duration_secs, 1800);
+        assert_eq!(incidents[0].failing_components.len(), 1);
+        assert_eq!(incidents[0].failing_components[0].name, "disk3");
+    }
+
+    #[tokio::test]
+    async fn list_incidents_returns_overlapping_incidents_whole() {
+        // The outage started before `since` and ended after `until`; it must be
+        // reported with its real boundaries, not truncated to the query range.
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let now = now_epoch();
+        s.insert_transition_at(m.id, Status::Ok, "up", now - 10_000)
+            .await;
+        s.insert_transition_at(m.id, Status::Critical, "down", now - 8000)
+            .await;
+        s.insert_transition_at(m.id, Status::Ok, "recovered", now - 2000)
+            .await;
+
+        let incidents = s
+            .list_incidents(now - 6000, now - 4000, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].incident.started_at, now - 8000);
+        assert_eq!(incidents[0].incident.ended_at, Some(now - 2000));
+    }
+
+    #[tokio::test]
+    async fn list_status_includes_bounded_recent_incidents() {
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let now = now_epoch();
+        s.insert_transition_at(m.id, Status::Ok, "up", now - 80_000)
+            .await;
+        // Six flaps inside the window; only the five newest are inlined.
+        for i in 0..6 {
+            let at = now - 70_000 + i * 1000;
+            s.insert_transition_at(m.id, Status::Critical, "down", at)
+                .await;
+            s.insert_transition_at(m.id, Status::Ok, "up", at + 100)
+                .await;
+        }
+        let all = s.list_status().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].recent_incidents.len(), RECENT_LIMIT);
+        // newest first
+        assert_eq!(all[0].recent_incidents[0].started_at, now - 65_000);
+    }
+
+    #[tokio::test]
+    async fn brand_new_monitor_has_no_recent_incidents() {
+        let s = store().await;
+        s.create_monitor(sample()).await.unwrap();
+        let all = s.list_status().await.unwrap();
+        assert!(all[0].recent_incidents.is_empty());
     }
 
     #[tokio::test]

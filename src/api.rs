@@ -1,6 +1,7 @@
 use crate::check::{ConfigSchema, Registry};
+use crate::incident::IncidentDetail;
 use crate::status::Status;
-use crate::store::{Monitor, MonitorStatus, NewMonitor, Sample, Store};
+use crate::store::{Monitor, MonitorStatus, NewMonitor, Sample, Store, now_epoch};
 use crate::uptime::{Uptime, compute_uptime};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -9,7 +10,6 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -40,6 +40,7 @@ pub fn build_app(state: ApiState) -> Router {
         .route("/api/v1/monitors/{id}/run", post(run_now))
         .route("/api/v1/monitors/{id}/history", get(monitor_history))
         .route("/api/v1/monitors/{id}/uptime", get(monitor_uptime))
+        .route("/api/v1/incidents", get(list_incidents))
         .fallback(crate::ui::serve_asset)
         .with_state(state)
 }
@@ -166,13 +167,6 @@ async fn run_now(
     Ok(Json(report))
 }
 
-fn now_epoch() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 async fn monitor_history(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
@@ -217,18 +211,55 @@ async fn monitor_uptime(
         .clamp(60, 90 * 86_400);
     let now = now_epoch();
     let window_start = now - window;
+    // Uptime only cares which status was in force; it ignores the transition's
+    // message, and counts an absent prior as Unknown time rather than dropping it.
     let prior = state
         .store
-        .status_at(id, window_start)
+        .last_transition_at_or_before(id, window_start)
         .await
         .map_err(internal)?
+        .map(|t| t.status)
         .unwrap_or(Status::Unknown);
-    let transitions = state
+    let transitions: Vec<(Status, i64)> = state
         .store
         .get_transitions_since(id, window_start)
         .await
-        .map_err(internal)?;
+        .map_err(internal)?
+        .into_iter()
+        .map(|t| (t.status, t.at))
+        .collect();
     Ok(Json(compute_uptime(prior, &transitions, window_start, now)))
+}
+
+/// Cross-monitor incident history, newest first, with per-component detail.
+///
+/// `monitor_id` is a filter rather than a path segment, so an unknown id yields
+/// an empty list rather than a 404.
+async fn list_incidents(
+    State(state): State<ApiState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<IncidentDetail>>, StatusCode> {
+    let now = now_epoch();
+    let since = q
+        .get("since")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(now - 7 * 86_400);
+    let until = q
+        .get("until")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(now);
+    let monitor_id = q.get("monitor_id").and_then(|s| s.parse::<i64>().ok());
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(50)
+        .clamp(1, 500);
+    let incidents = state
+        .store
+        .list_incidents(since, until, monitor_id, limit as usize)
+        .await
+        .map_err(internal)?;
+    Ok(Json(incidents))
 }
 
 #[cfg(test)]
@@ -489,6 +520,198 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    async fn monitor_named(store: &Store, name: &str) -> Monitor {
+        store
+            .create_monitor(NewMonitor {
+                name: name.into(),
+                type_id: "http".into(),
+                config: json!({ "url": "http://x" }),
+                interval_secs: 30,
+                enabled: true,
+            })
+            .await
+            .unwrap()
+    }
+
+    /// One closed incident ending `ago` seconds back, lasting 600s.
+    async fn seed_incident(store: &Store, id: i64, ago: i64) {
+        store
+            .insert_transition_at(
+                id,
+                crate::status::Status::Critical,
+                "down",
+                now_epoch() - ago,
+            )
+            .await;
+        store
+            .insert_transition_at(
+                id,
+                crate::status::Status::Ok,
+                "recovered",
+                now_epoch() - ago + 600,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn status_inlines_recent_incidents_without_component_detail() {
+        let (base, store) = spawn().await;
+        let m = monitor_named(&store, "unraid").await;
+        store
+            .insert_transition_at(m.id, crate::status::Status::Ok, "up", now_epoch() - 80_000)
+            .await;
+        // Six incidents inside the 24h window; the inline list is capped at 5.
+        for i in 0..6 {
+            seed_incident(&store, m.id, 70_000 - i * 1000).await;
+        }
+
+        let body: Value = reqwest::get(format!("{base}/api/v1/status"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let incidents = body[0]["recent_incidents"].as_array().unwrap();
+        assert_eq!(incidents.len(), 5);
+        assert_eq!(incidents[0]["duration_secs"], 600);
+        assert_eq!(incidents[0]["worst_status"], "critical");
+        assert!(incidents[0]["ended_at"].is_i64());
+        // Component detail is deliberately absent from the polling path.
+        assert!(incidents[0]["failing_components"].is_null());
+    }
+
+    #[tokio::test]
+    async fn status_incidents_are_empty_for_a_monitor_that_never_ran() {
+        let (base, store) = spawn().await;
+        monitor_named(&store, "fresh").await;
+        let body: Value = reqwest::get(format!("{base}/api/v1/status"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(body[0]["recent_incidents"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn incidents_endpoint_returns_detail_across_monitors() {
+        let (base, store) = spawn().await;
+        let a = monitor_named(&store, "unraid").await;
+        let b = monitor_named(&store, "plex").await;
+        seed_incident(&store, a.id, 3600).await;
+        seed_incident(&store, b.id, 7200).await;
+        store
+            .insert_sample_with_components_at(
+                a.id,
+                &crate::report::CheckReport::from_components(vec![crate::report::Component::new(
+                    "disk3",
+                    crate::status::Status::Critical,
+                    true,
+                    "SMART: FAILING_NOW",
+                )]),
+                now_epoch() - 3300,
+            )
+            .await;
+
+        let body: Value = reqwest::get(format!("{base}/api/v1/incidents"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        // newest first
+        assert_eq!(arr[0]["monitor_id"], a.id);
+        assert_eq!(arr[0]["monitor_name"], "unraid");
+        assert_eq!(arr[0]["failing_components"][0]["name"], "disk3");
+        assert_eq!(arr[0]["failing_components"][0]["worst_status"], "critical");
+        assert_eq!(arr[0]["failing_components"][0]["critical"], true);
+        // A monitor with no samples in range still reports the incident.
+        assert_eq!(arr[1]["monitor_name"], "plex");
+        assert!(arr[1]["failing_components"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn incidents_filter_by_monitor_id_and_since() {
+        let (base, store) = spawn().await;
+        let a = monitor_named(&store, "a").await;
+        let b = monitor_named(&store, "b").await;
+        seed_incident(&store, a.id, 3600).await;
+        seed_incident(&store, a.id, 400_000).await;
+        seed_incident(&store, b.id, 3600).await;
+
+        let by_monitor: Value = reqwest::get(format!(
+            "{base}/api/v1/incidents?monitor_id={}&since=0",
+            a.id
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(by_monitor.as_array().unwrap().len(), 2);
+
+        // `since` inside the last hour drops the older incident for that monitor.
+        let recent: Value = reqwest::get(format!(
+            "{base}/api/v1/incidents?monitor_id={}&since={}",
+            a.id,
+            now_epoch() - 7200
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(recent.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn incidents_clamp_limit() {
+        let (base, store) = spawn().await;
+        let m = monitor_named(&store, "a").await;
+        for i in 0..3 {
+            seed_incident(&store, m.id, 3600 + i * 1000).await;
+        }
+
+        let limited: Value = reqwest::get(format!("{base}/api/v1/incidents?limit=2"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(limited.as_array().unwrap().len(), 2);
+
+        // Below the floor clamps up to 1 rather than returning nothing.
+        let zero: Value = reqwest::get(format!("{base}/api/v1/incidents?limit=0"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(zero.as_array().unwrap().len(), 1);
+
+        // Above the ceiling clamps down without erroring.
+        let huge: Value = reqwest::get(format!("{base}/api/v1/incidents?limit=100000"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(huge.as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn incidents_unknown_monitor_id_is_empty_not_404() {
+        let (base, _store) = spawn().await;
+        let resp = reqwest::get(format!("{base}/api/v1/incidents?monitor_id=999"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: Value = resp.json().await.unwrap();
+        assert!(body.as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
