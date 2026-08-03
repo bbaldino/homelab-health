@@ -1,16 +1,32 @@
 name: publish-image
 
+# Tags only. NEVER add `branches: [main]` here.
+#
+# A release commit is reached twice — as a push to main and as the vX.Y.Z tag —
+# so triggering on both builds the same source twice, and both runs write
+# sha-<short>. They cannot cancel each other (the concurrency group keys on
+# github.ref), so they race, and since Docker builds are not byte-reproducible
+# whichever lands last silently repoints sha-<short> at a different digest.
+# That makes the one tag meant to identify an exact build the one tag you
+# cannot trust.
+#
+# Tag-only means a single run writes every tag from a single build, so
+# X.Y.Z / X.Y / latest / sha-<short> all share one digest and sha- genuinely
+# IS the release. Verify a release by checking all four agree.
+#
+# The cost is no image for commits that are never released. That is acceptable
+# here: release_commits in release-plz.toml limits unreleased commits to
+# docs/ci/chore, which nobody deploys, and auto-merge keeps the merge-to-release
+# window to a few minutes.
+#
+# The test gate is NOT lost by dropping the main trigger: release-plz.yml still
+# fires on main and `needs:` the same reusable test.yml, so a red main still
+# blocks both the release and the image.
 on:
   push:
-    branches: [main]
     tags: ['v*.*.*']
   workflow_dispatch:
 
-# main-push and tag-push are different refs and can run concurrently, since the
-# group below keys on github.ref. That is only safe because they write disjoint
-# tag sets — see the `enable={{is_default_branch}}` on the sha rule below, which
-# is what actually makes it true. Without it both refs emit sha-<short> for the
-# release commit and the later run silently repoints it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -46,23 +62,17 @@ jobs:
           # latest land on BOTH paths, so it bounces between "tip of main" and
           # "newest release" depending on which workflow ran last.
           #
-          # sha- is restricted to main. A release commit is reached twice — as a
-          # push to main and as the vX.Y.Z tag — and type=sha has no ref
-          # restriction by default, so both runs would emit sha-<short> for the
-          # same commit. They race, and since Docker builds are not
-          # byte-reproducible, whichever finishes last repoints sha-<short> at a
-          # different digest. That makes the one tag meant to identify an exact
-          # build the one tag you cannot trust. Restricting it to main makes it
-          # single-writer and deterministic.
-          #
-          # This removes the race, not the second build: the release commit is
-          # still built once per ref, so sha-<short> and X.Y.Z remain distinct
-          # digests of identical source. Verify a release by comparing the three
-          # version tags to each other, not to sha-<short>.
+          # sha- is deliberately NOT restricted by ref. Under the tag-only
+          # trigger above there is exactly one run per release, so all four tags
+          # come from one build and share one digest — which is the point:
+          # sha-<short> identifies the released artifact rather than a separate
+          # build of the same source. An `enable={{is_default_branch}}` here
+          # would suppress it on the tag path and leave releases with no sha-
+          # tag at all.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-,enable={{is_default_branch}}
+            type=sha,prefix=sha-
 
       - uses: docker/build-push-action@v6
         with:
