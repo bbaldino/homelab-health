@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/bbaldino/homelab-health/compare/v0.2.4...v0.3.0) - 2026-08-03
+
+### Added
+
+- surface recent incidents in the web UI
+- recent incidents API (surface failures that already recovered)
+
+### Fixed
+
+- seed incidents from the whole open run, not one row
+- seed incidents from the transition that opened them
+
+### Other
+
+- design for recent-incidents API (surface failures that recovered)
+- gate both publish-image and release-plz on a shared test job
+- formalize telemetry (raw top-level fields) in the health contract
+
 ## [0.2.4](https://github.com/bbaldino/homelab-health/compare/v0.2.3...v0.2.4) - 2026-08-01
 
 ### Added
