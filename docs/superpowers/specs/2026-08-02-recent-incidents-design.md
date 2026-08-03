@@ -150,6 +150,32 @@ monitor_id  optional filter
 limit       default 50, clamped 1..500   (matches existing endpoint conventions)
 ```
 
+#### Parameter validation
+
+The same contract applies to every query parameter on this endpoint and on
+`/monitors/{id}/history` (`limit`) and `/monitors/{id}/uptime` (`window`):
+
+- **Absent** → the documented default.
+- **Present but malformed** → `400` with a plain-text body naming the parameter
+  and what was expected, e.g.
+  `invalid "since": expected epoch seconds (integer 0..4102444800), got "garbage"`.
+  A malformed value is never silently replaced by the default: the consumer
+  would get a `200` describing a query the server did not run.
+- **Valid but out of range** (`limit`, `window`) → clamped, still `200`.
+  Clamping a well-formed number is a kindness; accepting a malformed one is not.
+- **`since > until`** → `400`. An inverted range otherwise returns `[]`, which is
+  the same ambiguity: nothing happened, or the request was wrong?
+
+`since`/`until` are rejected above `4102444800` (year 2100) specifically because
+`Date.now()` milliseconds parse as a valid integer. Before this rule,
+`?since=99999999999` returned `200 []` — a wrong request indistinguishable from a
+quiet week, which is exactly the distinction this endpoint exists to preserve.
+
+**Unknown parameters are ignored, deliberately** — `?days=7` is a `200` with the
+defaults applied, not a `400`. That is standard HTTP behavior and what lets a
+newer consumer talk to an older server. This is the one case a reader might
+expect to be rejected given the rules above, so it is pinned by a test.
+
 Each entry adds `monitor_id` and `monitor_name` to the incident shape, plus
 `failing_components`:
 

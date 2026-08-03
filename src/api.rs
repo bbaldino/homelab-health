@@ -17,9 +17,65 @@ pub struct ApiState {
     pub registry: Arc<Registry>,
 }
 
-fn internal(e: sqlx::Error) -> StatusCode {
+/// Handler error: a status plus a plain-text body. axum renders the tuple as
+/// `text/plain`, so a rejected request explains itself instead of arriving as a
+/// bare status code.
+type ApiError = (StatusCode, String);
+
+fn internal(e: sqlx::Error) -> ApiError {
     tracing::error!("db error: {e}");
-    StatusCode::INTERNAL_SERVER_ERROR
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal error".to_string(),
+    )
+}
+
+fn not_found() -> ApiError {
+    (StatusCode::NOT_FOUND, "not found".to_string())
+}
+
+/// Timestamps above this are rejected as implausible epoch seconds. The value
+/// consumers actually send by mistake is `Date.now()` in milliseconds, which
+/// parses as a perfectly good integer somewhere around the year 5138 and would
+/// otherwise return an empty window with a 200 — indistinguishable from
+/// "nothing happened".
+const MAX_EPOCH_SECS: i64 = 4_102_444_800; // 2100-01-01T00:00:00Z
+
+/// Parses an optional integer query parameter.
+///
+/// Absent yields `Ok(None)` and the caller applies its default. Present but
+/// unparseable (or outside `valid`) is a 400 naming the parameter — never a
+/// silent fallback to the default, which would hand a consumer a successful
+/// response to a request the server did not actually honor.
+///
+/// Range-checking here is for values that are malformed as their *type*.
+/// Parameters with a meaningful range (`limit`, `window`) pass `FULL` and clamp
+/// afterwards: clamping a valid number is a kindness, accepting a malformed one
+/// is not.
+fn int_param(
+    q: &HashMap<String, String>,
+    name: &str,
+    expected: &str,
+    valid: std::ops::RangeInclusive<i64>,
+) -> Result<Option<i64>, ApiError> {
+    let Some(raw) = q.get(name) else {
+        return Ok(None);
+    };
+    match raw.parse::<i64>() {
+        Ok(v) if valid.contains(&v) => Ok(Some(v)),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid \"{name}\": expected {expected}, got \"{raw}\""),
+        )),
+    }
+}
+
+const FULL: std::ops::RangeInclusive<i64> = i64::MIN..=i64::MAX;
+
+/// An epoch-seconds parameter, defaulted when absent.
+fn epoch_param(q: &HashMap<String, String>, name: &str, default: i64) -> Result<i64, ApiError> {
+    let expected = format!("epoch seconds (integer 0..{MAX_EPOCH_SECS})");
+    Ok(int_param(q, name, &expected, 0..=MAX_EPOCH_SECS)?.unwrap_or(default))
 }
 
 pub fn build_app(state: ApiState) -> Router {
@@ -71,7 +127,7 @@ struct InspectRequest {
 
 async fn prometheus_inspect(
     Json(req): Json<InspectRequest>,
-) -> Result<Json<crate::check::prometheus::InspectResult>, (StatusCode, String)> {
+) -> Result<Json<crate::check::prometheus::InspectResult>, ApiError> {
     let timeout = req.timeout_secs.unwrap_or(10);
     match crate::check::prometheus::fetch_and_parse(&req.url, timeout).await {
         Ok(series) => Ok(Json(crate::check::prometheus::inspect_result(&series))),
@@ -91,7 +147,7 @@ async fn prometheus_inspect(
     }
 }
 
-async fn list_monitors(State(state): State<ApiState>) -> Result<Json<Vec<Monitor>>, StatusCode> {
+async fn list_monitors(State(state): State<ApiState>) -> Result<Json<Vec<Monitor>>, ApiError> {
     let monitors = state.store.list_monitors().await.map_err(internal)?;
     Ok(Json(monitors))
 }
@@ -99,7 +155,7 @@ async fn list_monitors(State(state): State<ApiState>) -> Result<Json<Vec<Monitor
 async fn create_monitor(
     State(state): State<ApiState>,
     Json(body): Json<NewMonitor>,
-) -> Result<(StatusCode, Json<Monitor>), StatusCode> {
+) -> Result<(StatusCode, Json<Monitor>), ApiError> {
     let monitor = state.store.create_monitor(body).await.map_err(internal)?;
     Ok((StatusCode::CREATED, Json(monitor)))
 }
@@ -108,7 +164,7 @@ async fn update_monitor(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
     Json(body): Json<NewMonitor>,
-) -> Result<Json<Monitor>, StatusCode> {
+) -> Result<Json<Monitor>, ApiError> {
     match state
         .store
         .update_monitor(id, body)
@@ -116,24 +172,22 @@ async fn update_monitor(
         .map_err(internal)?
     {
         Some(m) => Ok(Json(m)),
-        None => Err(StatusCode::NOT_FOUND),
+        None => Err(not_found()),
     }
 }
 
 async fn delete_monitor(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, ApiError> {
     if state.store.delete_monitor(id).await.map_err(internal)? {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(StatusCode::NOT_FOUND)
+        Err(not_found())
     }
 }
 
-async fn list_status(
-    State(state): State<ApiState>,
-) -> Result<Json<Vec<MonitorStatus>>, StatusCode> {
+async fn list_status(State(state): State<ApiState>) -> Result<Json<Vec<MonitorStatus>>, ApiError> {
     let all = state.store.list_status().await.map_err(internal)?;
     Ok(Json(all))
 }
@@ -141,20 +195,20 @@ async fn list_status(
 async fn get_status(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
-) -> Result<Json<MonitorStatus>, StatusCode> {
+) -> Result<Json<MonitorStatus>, ApiError> {
     match state.store.get_status(id).await.map_err(internal)? {
         Some(ms) => Ok(Json(ms)),
-        None => Err(StatusCode::NOT_FOUND),
+        None => Err(not_found()),
     }
 }
 
 async fn run_now(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
-) -> Result<Json<crate::report::CheckReport>, StatusCode> {
+) -> Result<Json<crate::report::CheckReport>, ApiError> {
     let monitor = match state.store.get_monitor(id).await.map_err(internal)? {
         Some(m) => m,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(not_found()),
     };
     // Run-now persists immediately and intentionally bypasses the scheduler's
     // debounce, so a one-off /run result may momentarily differ from scheduled state.
@@ -171,7 +225,12 @@ async fn monitor_history(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
     Query(q): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<Sample>>, StatusCode> {
+) -> Result<Json<Vec<Sample>>, ApiError> {
+    // Parameters are validated before the monitor lookup: a malformed request
+    // is rejected without touching the database.
+    let limit = int_param(&q, "limit", "integer", FULL)?
+        .unwrap_or(100)
+        .clamp(1, 500);
     if state
         .store
         .get_monitor(id)
@@ -179,13 +238,8 @@ async fn monitor_history(
         .map_err(internal)?
         .is_none()
     {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(not_found());
     }
-    let limit = q
-        .get("limit")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(100)
-        .clamp(1, 500);
     let samples = state.store.get_samples(id, limit).await.map_err(internal)?;
     Ok(Json(samples))
 }
@@ -194,7 +248,10 @@ async fn monitor_uptime(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
     Query(q): Query<HashMap<String, String>>,
-) -> Result<Json<Uptime>, StatusCode> {
+) -> Result<Json<Uptime>, ApiError> {
+    let window = int_param(&q, "window", "seconds (integer)", FULL)?
+        .unwrap_or(86_400)
+        .clamp(60, 90 * 86_400);
     if state
         .store
         .get_monitor(id)
@@ -202,13 +259,8 @@ async fn monitor_uptime(
         .map_err(internal)?
         .is_none()
     {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(not_found());
     }
-    let window = q
-        .get("window")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(86_400)
-        .clamp(60, 90 * 86_400);
     let now = now_epoch();
     let window_start = now - window;
     // Uptime only cares which status was in force; it ignores the transition's
@@ -238,22 +290,25 @@ async fn monitor_uptime(
 async fn list_incidents(
     State(state): State<ApiState>,
     Query(q): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<IncidentDetail>>, StatusCode> {
+) -> Result<Json<Vec<IncidentDetail>>, ApiError> {
     let now = now_epoch();
-    let since = q
-        .get("since")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(now - 7 * 86_400);
-    let until = q
-        .get("until")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(now);
-    let monitor_id = q.get("monitor_id").and_then(|s| s.parse::<i64>().ok());
-    let limit = q
-        .get("limit")
-        .and_then(|s| s.parse::<i64>().ok())
+    // Unknown query parameters (`?days=7`) are ignored on purpose, not
+    // rejected: that is standard HTTP behavior and what lets a newer consumer
+    // talk to an older server.
+    let since = epoch_param(&q, "since", now - 7 * 86_400)?;
+    let until = epoch_param(&q, "until", now)?;
+    let monitor_id = int_param(&q, "monitor_id", "integer", FULL)?;
+    let limit = int_param(&q, "limit", "integer", FULL)?
         .unwrap_or(50)
         .clamp(1, 500);
+    if since > until {
+        // Otherwise an inverted range returns `[]`, the same ambiguity as a
+        // silently-defaulted parameter: nothing happened, or you asked wrong?
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid range: \"since\" ({since}) is after \"until\" ({until})"),
+        ));
+    }
     let incidents = state
         .store
         .list_incidents(since, until, monitor_id, limit as usize)
@@ -712,6 +767,195 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: Value = resp.json().await.unwrap();
         assert!(body.as_array().unwrap().is_empty());
+    }
+
+    /// A malformed parameter must produce a 400 whose body names the parameter,
+    /// so a consumer can fix the call from the response alone.
+    async fn assert_rejects(url: String, param: &str) {
+        let resp = reqwest::get(url).await.unwrap();
+        assert_eq!(resp.status(), 400, "expected 400 for {param}");
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains(&format!("\"{param}\"")),
+            "body {body:?} does not name {param}"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_limit_rejects_unparseable() {
+        let (base, store) = spawn().await;
+        let m = monitor_named(&store, "a").await;
+        assert_rejects(
+            format!("{base}/api/v1/monitors/{}/history?limit=abc", m.id),
+            "limit",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn history_limit_defaults_and_clamps() {
+        let (base, store) = spawn().await;
+        let m = monitor_named(&store, "a").await;
+        for _ in 0..105 {
+            store
+                .record_sample(m.id, &crate::report::CheckReport::ok("hi"))
+                .await
+                .unwrap();
+        }
+
+        let default: Value = reqwest::get(format!("{base}/api/v1/monitors/{}/history", m.id))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(default.as_array().unwrap().len(), 100);
+
+        // Out of range clamps rather than 400s: 0 -> 1, huge -> 500 (all 105).
+        let floor: Value = reqwest::get(format!("{base}/api/v1/monitors/{}/history?limit=0", m.id))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(floor.as_array().unwrap().len(), 1);
+
+        let ceiling: Value = reqwest::get(format!(
+            "{base}/api/v1/monitors/{}/history?limit=100000",
+            m.id
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(ceiling.as_array().unwrap().len(), 105);
+    }
+
+    #[tokio::test]
+    async fn uptime_window_rejects_unparseable() {
+        let (base, store) = spawn().await;
+        let m = monitor_named(&store, "a").await;
+        assert_rejects(
+            format!("{base}/api/v1/monitors/{}/uptime?window=abc", m.id),
+            "window",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn uptime_window_defaults_and_clamps() {
+        let (base, store) = spawn().await;
+        let m = monitor_named(&store, "a").await;
+
+        let default: Value = reqwest::get(format!("{base}/api/v1/monitors/{}/uptime", m.id))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(default["window_secs"], 86_400);
+
+        let floor: Value = reqwest::get(format!("{base}/api/v1/monitors/{}/uptime?window=1", m.id))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(floor["window_secs"], 60);
+
+        let ceiling: Value = reqwest::get(format!(
+            "{base}/api/v1/monitors/{}/uptime?window=99999999",
+            m.id
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(ceiling["window_secs"], 90 * 86_400);
+    }
+
+    #[tokio::test]
+    async fn incidents_reject_unparseable_params() {
+        let (base, _store) = spawn().await;
+        for (param, value) in [
+            ("since", "garbage"),
+            ("until", "garbage"),
+            ("monitor_id", "seven"),
+            ("limit", "abc"),
+        ] {
+            assert_rejects(format!("{base}/api/v1/incidents?{param}={value}"), param).await;
+        }
+    }
+
+    /// The regression that motivated this: `Date.now()` milliseconds parse as a
+    /// valid integer, so the endpoint used to answer 200 with `[]` — a wrong
+    /// request masquerading as a quiet week.
+    #[tokio::test]
+    async fn incidents_reject_millisecond_timestamps() {
+        let (base, store) = spawn().await;
+        let m = monitor_named(&store, "a").await;
+        seed_incident(&store, m.id, 3600).await;
+        assert_rejects(
+            format!("{base}/api/v1/incidents?since=99999999999"),
+            "since",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn incidents_reject_since_after_until() {
+        let (base, _store) = spawn().await;
+        let now = now_epoch();
+        let resp = reqwest::get(format!(
+            "{base}/api/v1/incidents?since={}&until={}",
+            now,
+            now - 3600
+        ))
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), 400);
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains("\"since\"") && body.contains("\"until\""),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn incidents_absent_params_use_defaults() {
+        let (base, store) = spawn().await;
+        let m = monitor_named(&store, "a").await;
+        seed_incident(&store, m.id, 3600).await;
+        // Outside the default 7d window.
+        seed_incident(&store, m.id, 10 * 86_400).await;
+
+        let body: Value = reqwest::get(format!("{base}/api/v1/incidents"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body.as_array().unwrap().len(), 1);
+    }
+
+    /// Unknown parameters stay ignored on purpose — do not "fix" this into a
+    /// rejection; forward compatibility depends on it.
+    #[tokio::test]
+    async fn incidents_ignore_unknown_params() {
+        let (base, store) = spawn().await;
+        let m = monitor_named(&store, "a").await;
+        seed_incident(&store, m.id, 3600).await;
+        seed_incident(&store, m.id, 10 * 86_400).await;
+
+        let resp = reqwest::get(format!("{base}/api/v1/incidents?days=7"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: Value = resp.json().await.unwrap();
+        // Still the default 7d window, not something derived from `days`.
+        assert_eq!(body.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
