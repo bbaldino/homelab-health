@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/bbaldino/homelab-health/compare/v0.3.1...v0.3.2) - 2026-08-03
+
+### Added
+
+- add a favicon to the web UI
+
+### Other
+
+- publish on version tags only, one build per release
+
 ## [0.3.1](https://github.com/bbaldino/homelab-health/compare/v0.3.0...v0.3.1) - 2026-08-03
 
 ### Fixed
