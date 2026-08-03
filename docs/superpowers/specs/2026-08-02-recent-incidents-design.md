@@ -132,7 +132,7 @@ the 5 newest, **without** `failing_components`:
 Enough to render "green, but 2 incidents overnight" plus a tooltip. Component
 detail is deliberately excluded to keep the polling path cheap: it costs **two
 extra queries per poll total** — one batched transitions query and one batched
-prior-transition query across all monitors — rather than per-monitor work.
+open-run query across all monitors — rather than per-monitor work.
 
 Bounds (24h, 5) are fixed constants, not query parameters; consumers wanting more
 use the endpoint below.
@@ -190,23 +190,32 @@ Mirrors `src/uptime.rs`: a pure function, unit-testable without a database.
 
 ```rust
 pub fn compute_incidents(
-    prior: Option<(Status, i64)>,   // transition that OPENED the incident in
-                                    // force at the window start (see below)
-    transitions: &[TransitionRow],  // ascending by `at`, since window start
+    transitions: &[TransitionRow],  // ascending by `at`
     now: i64,
 ) -> Vec<Incident>                  // newest first, failing_components empty
 ```
 
-`prior` is **not** simply the last transition at or before the window start. A
-monitor can commit several non-Ok transitions in a row with no intervening Ok —
-the scheduler's debounce is in-memory, so a process restart re-commits the status
-the monitor is already in — and the last row of such a run is not when the outage
-began. Seeding from it reports `started_at` too late, and *differently for every
-window size*, which is precisely what "incidents overlapping the requested range
-are returned whole" forbids. `prior` is therefore the **earliest non-Ok
-transition after the most recent Ok transition at or before the window start**,
-and `None` when the monitor was Ok there or has no transitions at all — both
-meaning no incident was open going into the window.
+There is deliberately **no prior-status parameter**. The caller prepends the
+monitor's **whole open run** — every non-Ok transition since the last Ok at or
+before the window start — to the transitions read from within the window, and
+hands the concatenation to `compute_incidents`. The function already opens an
+incident at the first non-Ok row and merges escalations across subsequent rows,
+so correct behavior falls out of the existing rules with no extra branching.
+
+A *single* seed row is not enough, for two independent reasons. A run can
+**escalate** before the window starts — degraded Monday, critical Tuesday, asked
+over the last 24h — and the escalation row is then in neither the seed nor the
+window, so the incident reports the opening severity and message: a critical
+outage displayed as degraded. A run can also **re-commit** the same status
+without escalating, because the scheduler's debounce is in-memory and a restart
+re-commits the status the monitor is already in; seeding from the run's tail then
+reports `started_at` too late, and *differently for every window size*. Both are
+precisely what "incidents overlapping the requested range are returned whole"
+forbids, and both disappear once the whole run is fed through the same loop.
+
+An empty open run prepends nothing, so nothing is open going into the window —
+the monitor was Ok there, or has no transitions at all. That preserves the
+brand-new-monitor rule for free.
 
 `failing_components` is populated separately by the store, only for the
 `/incidents` path — keeping the grouping logic pure and DB-free.
@@ -221,12 +230,15 @@ meaning no incident was open going into the window.
   generalizes the existing `status_at`, which returns the status but not when it
   started. This is the **uptime** query: it reports the status actually in force
   at `ts`, `Ok` included, and must keep doing so.
-- `open_incident_start(monitor_id, ts) -> Option<TransitionRow>` — the
-  **incident** query: the earliest non-Ok transition after the most recent Ok
-  transition at or before `ts`, i.e. the row that opened the run rather than its
-  tail. `None` when the monitor was Ok at `ts` or has no transitions.
-- Batched variants of all three, keyed by monitor, for the `/status` path. The
-  existing `list_status` N+1 is out of scope, but this must not add to it.
+- `open_run(monitor_id, ts) -> Vec<TransitionRow>` — the **incident** query:
+  every non-Ok transition after the most recent Ok transition at or before `ts`,
+  ascending. The whole run, not just the row that opened it, so escalations that
+  happened before `ts` are still seen. Empty when the monitor was Ok at `ts` or
+  has no transitions.
+- Batched variants of all three, keyed by monitor, for the `/status` path —
+  `open_run_all` returning a `HashMap<i64, Vec<TransitionRow>>` from a **single**
+  query. The existing `list_status` N+1 is out of scope, but this must not add to
+  it.
 - `failing_components_for(monitor_id, start, end) -> Vec<FailingComponent>` —
   scans samples in range, folds per component name.
 
@@ -266,15 +278,20 @@ contract end-to-end.
   `worst_status: critical` and the message from the escalation
 - flap (down, up, down, up) produces **two** incidents
 - ongoing incident yields `ended_at: null` and `duration_secs` measured to `now`
-- prior status non-Ok at window start opens an incident at its *real*
+- an open run prepended from before the window opens the incident at its *real*
   `started_at`, before the window
+- an escalation *within* that prepended run still sets `worst_status` and the
+  message, even though it too happened before the window
 - a re-committed status inside the window (restart) folds into the open incident
   instead of restating when it began
 
-Store-level, for `open_incident_start`: a run of consecutive non-Ok transitions
-with no intervening Ok returns the **earliest** row of the run; a monitor that
-was Ok at `ts` returns `None`; and the same incident queried through a 1-day and
-a 7-day window reports an identical `started_at` and `duration_secs`.
+Store-level, for `open_run`: a run of consecutive non-Ok transitions with no
+intervening Ok returns **every** row of the run, ascending, and excludes an
+earlier already-closed outage; a monitor that was Ok at `ts` returns empty; the
+same incident queried through a 1-day and a 7-day window reports an identical
+`started_at` and `duration_secs`; and an incident that escalated before the
+1-day boundary reports the same `worst_status` and message through both windows
+and through the inline `/status` path.
 - **no transitions at all → empty vec** (the brand-new-monitor case)
 - unknown opens an incident like any other non-Ok status
 

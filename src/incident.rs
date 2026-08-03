@@ -58,38 +58,38 @@ pub struct IncidentDetail {
 
 /// Group committed status transitions into incidents.
 ///
-/// `prior` is the transition that *opened* the incident in force at the window
-/// start — the earliest non-Ok transition after the last Ok at or before it,
-/// not merely the last transition before it. A monitor can commit several
-/// non-Ok transitions in a row with no intervening Ok (the scheduler's debounce
-/// is in-memory, so a restart re-commits the current status), and seeding from
-/// the tail of that run would report `started_at` too late, differently for
-/// every window size. See `Store::open_incident_start`.
-///
 /// `transitions` must be ascending by `at`; out-of-order input misgroups
-/// incidents. `failing_components` is deliberately not computed here — it comes
-/// from a sample scan in the store, keeping this grouping pure and DB-free.
+/// incidents. There is deliberately no separate "prior status" parameter: a
+/// caller working from a window start prepends the monitor's *whole open run* —
+/// every non-Ok transition since the last Ok at or before that start, see
+/// [`crate::store::Store::open_run`] — and the rules below then do the rest.
+///
+/// A single prior row is not enough. A run can escalate before the window
+/// starts (degraded Monday, critical Tuesday, queried over the last 24h), and
+/// any row of it that is neither the seed nor inside the window is invisible:
+/// the incident would report the *opening* severity and message, showing a
+/// critical outage as degraded. It can also re-commit the same status without
+/// escalating — the scheduler's debounce is in-memory, so a restart re-commits
+/// the status the monitor is already in — and seeding from the tail of that run
+/// would report `started_at` too late, differently for every window size.
+/// Feeding the whole run through the same loop as everything else fixes both
+/// without a special case.
+///
+/// `failing_components` is deliberately not computed here — it comes from a
+/// sample scan in the store, keeping this grouping pure and DB-free.
 ///
 /// Returns newest first.
 ///
-/// A `prior` of `None` means no incident was open at the window start: either
-/// the monitor was Ok, or nothing was ever recorded and its status is unknown
-/// *by absence*. Neither opens an incident. The latter diverges from
-/// `compute_uptime`, which honestly counts that span as `unknown_secs`: absence
-/// of data is not evidence of failure, and a brand-new monitor must not fake an
-/// outage.
-pub fn compute_incidents(
-    prior: Option<&TransitionRow>,
-    transitions: &[TransitionRow],
-    now: i64,
-) -> Vec<Incident> {
+/// An empty open run prepends nothing, so no incident is open going into the
+/// window: either the monitor was Ok there, or nothing was ever recorded and
+/// its status is unknown *by absence*. Neither opens an incident. The latter
+/// diverges from `compute_uptime`, which honestly counts that span as
+/// `unknown_secs`: absence of data is not evidence of failure, and a brand-new
+/// monitor must not fake an outage.
+pub fn compute_incidents(transitions: &[TransitionRow], now: i64) -> Vec<Incident> {
     let mut incidents = Vec::new();
     // The incident currently open, as (started_at, worst_status, message).
     let mut open: Option<(i64, Status, &str)> = None;
-
-    if let Some(p) = prior.filter(|p| p.status != Status::Ok) {
-        open = Some((p.at, p.status, &p.message));
-    }
 
     for row in transitions {
         match (row.status, open.as_mut()) {
@@ -151,8 +151,8 @@ mod tests {
         // Degraded 100 -> Critical 200 -> Ok 400 is ONE incident of 300s, and
         // the message is the one from the escalation, not from the open.
         let incidents = compute_incidents(
-            Some(&t(Status::Ok, "up", 0)),
             &[
+                t(Status::Ok, "up", 0),
                 t(Status::Degraded, "slow", 100),
                 t(Status::Critical, "2 of 8 components unhealthy", 200),
                 t(Status::Ok, "recovered", 400),
@@ -172,8 +172,8 @@ mod tests {
         // Critical twice at the same severity: the first line is the one that
         // explains how it got that bad, so it wins.
         let incidents = compute_incidents(
-            Some(&t(Status::Ok, "up", 0)),
             &[
+                t(Status::Ok, "up", 0),
                 t(Status::Critical, "disk3 failing", 100),
                 t(Status::Critical, "disk3 and disk4 failing", 200),
                 t(Status::Ok, "recovered", 300),
@@ -187,8 +187,8 @@ mod tests {
     #[test]
     fn flap_produces_two_incidents() {
         let incidents = compute_incidents(
-            Some(&t(Status::Ok, "up", 0)),
             &[
+                t(Status::Ok, "up", 0),
                 t(Status::Critical, "down", 100),
                 t(Status::Ok, "up", 150),
                 t(Status::Critical, "down again", 200),
@@ -205,8 +205,7 @@ mod tests {
     #[test]
     fn ongoing_incident_has_null_end_and_duration_to_now() {
         let incidents = compute_incidents(
-            Some(&t(Status::Ok, "up", 0)),
-            &[t(Status::Critical, "down", 100)],
+            &[t(Status::Ok, "up", 0), t(Status::Critical, "down", 100)],
             460,
         );
         assert_eq!(incidents.len(), 1);
@@ -215,12 +214,14 @@ mod tests {
     }
 
     #[test]
-    fn prior_non_ok_opens_at_its_real_start_before_the_window() {
+    fn open_run_before_the_window_opens_at_its_real_start() {
         // Window starts at 1000 but the outage began at 700; the incident is
         // reported whole rather than truncated at the window boundary.
         let incidents = compute_incidents(
-            Some(&t(Status::Critical, "down", 700)),
-            &[t(Status::Ok, "recovered", 1200)],
+            &[
+                t(Status::Critical, "down", 700),
+                t(Status::Ok, "recovered", 1200),
+            ],
             1300,
         );
         assert_eq!(incidents.len(), 1);
@@ -231,12 +232,32 @@ mod tests {
     }
 
     #[test]
+    fn escalation_before_the_window_still_sets_worst_status() {
+        // The whole open run is prepended, so an escalation that happened
+        // entirely before the window start is still seen. A single seed row
+        // would report only the opening severity — a critical outage displayed
+        // as degraded.
+        let incidents = compute_incidents(
+            &[
+                t(Status::Degraded, "disk3 failing", 700),
+                t(Status::Critical, "disk3 and disk4 failing", 800),
+                t(Status::Ok, "recovered", 1200),
+            ],
+            1300,
+        );
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].started_at, 700);
+        assert_eq!(incidents[0].worst_status, Status::Critical);
+        assert_eq!(incidents[0].message, "disk3 and disk4 failing");
+    }
+
+    #[test]
     fn re_committed_status_inside_the_window_does_not_move_the_start() {
         // A restart re-commits the status the monitor is already in. That row
         // must fold into the open incident rather than restating when it began.
         let incidents = compute_incidents(
-            Some(&t(Status::Degraded, "disk3 failing", 700)),
             &[
+                t(Status::Degraded, "disk3 failing", 700),
                 t(Status::Degraded, "disk3 failing", 1100),
                 t(Status::Ok, "recovered", 1200),
             ],
@@ -249,9 +270,10 @@ mod tests {
 
     #[test]
     fn brand_new_monitor_produces_no_incident() {
-        // No transition at or before the window start: status is unknown by
+        // No transition at or before the window start: the open run is empty
+        // and prepends nothing, so nothing is open. Status is unknown by
         // absence, and absence of data is not evidence of failure.
-        assert!(compute_incidents(None, &[], 1000).is_empty());
+        assert!(compute_incidents(&[], 1000).is_empty());
     }
 
     #[test]
@@ -259,8 +281,10 @@ mod tests {
         // A check that couldn't reach the service at 3am is exactly the outage
         // worth seeing; consumers filter on worst_status if they disagree.
         let incidents = compute_incidents(
-            Some(&t(Status::Ok, "up", 0)),
-            &[t(Status::Unknown, "unreachable", 100)],
+            &[
+                t(Status::Ok, "up", 0),
+                t(Status::Unknown, "unreachable", 100),
+            ],
             200,
         );
         assert_eq!(incidents.len(), 1);

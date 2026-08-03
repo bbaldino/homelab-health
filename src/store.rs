@@ -410,24 +410,35 @@ impl Store {
             .collect())
     }
 
-    /// The transition that *opened* the incident in force at `at`, if any: the
-    /// earliest non-Ok transition following the most recent Ok transition at or
-    /// before `at`. `None` when the monitor was Ok going into `at`, or has no
-    /// transitions at all — both correctly mean "no incident open".
+    /// The monitor's *open run* at `at`: every non-Ok transition following the
+    /// most recent Ok transition at or before `at`, ascending. Empty when the
+    /// monitor was Ok going into `at`, or has no transitions at all — both
+    /// correctly mean "no incident open".
     ///
-    /// This is deliberately not [`Store::last_transition_at_or_before`]. A
-    /// monitor can commit several non-Ok transitions in a row with no
-    /// intervening Ok — the scheduler's debounce lives in memory, so a restart
-    /// re-commits the current status — and the *last* of that run is not when
-    /// the outage began. Seeding an incident from it reports `started_at` too
-    /// late, and differently depending on the query window, which is exactly
-    /// what "an incident is never truncated at a query boundary" forbids.
-    pub async fn open_incident_start(
+    /// Callers prepend this to [`Store::get_transitions_since`] and hand the
+    /// concatenation to [`compute_incidents`]; the run then flows through the
+    /// same grouping rules as everything else.
+    ///
+    /// The whole run, not just its first row. Two things happen inside a run
+    /// that a single seed row cannot express: it can **escalate** (degraded
+    /// Monday, critical Tuesday — through a 24h window the escalation is in
+    /// neither the seed nor the window, so a critical outage reports as
+    /// degraded), and it can **re-commit** the same status without escalating —
+    /// the scheduler's debounce lives in memory, so a restart re-commits the
+    /// status the monitor is already in. Seeding from the run's tail instead
+    /// would report `started_at` too late, differently per window size, which is
+    /// exactly what "an incident is never truncated at a query boundary"
+    /// forbids.
+    ///
+    /// This is deliberately not [`Store::last_transition_at_or_before`], which
+    /// reports the status actually in force at `at`, Ok included, and is what
+    /// uptime needs.
+    pub async fn open_run(
         &self,
         monitor_id: i64,
         at: i64,
-    ) -> Result<Option<TransitionRow>, sqlx::Error> {
-        let row = sqlx::query(
+    ) -> Result<Vec<TransitionRow>, sqlx::Error> {
+        let rows = sqlx::query(
             "SELECT status, message, at FROM status_transitions t
              WHERE t.monitor_id = ?1 AND t.at <= ?2 AND t.status != 'ok'
                AND NOT EXISTS (
@@ -436,51 +447,47 @@ impl Store {
                      AND ok.at <= ?2
                      AND (ok.at > t.at OR (ok.at = t.at AND ok.id > t.id))
                )
-             ORDER BY t.at ASC, t.id ASC LIMIT 1",
+             ORDER BY t.at ASC, t.id ASC",
         )
         .bind(monitor_id)
         .bind(at)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
-        Ok(row.map(row_to_transition))
+        Ok(rows.into_iter().map(row_to_transition).collect())
     }
 
-    /// Batched [`Store::open_incident_start`] across every monitor.
+    /// Batched [`Store::open_run`] across every monitor, in one query — the
+    /// `/status` polling path must not gain N+1 work.
     ///
     /// `ok_after` marks rows that have a later Ok at or before `at` — the window
     /// runs backwards, and the row itself is non-Ok, so it can only be set by a
-    /// strictly later recovery. What survives is each monitor's open run; `rn`
-    /// then takes the earliest row of it.
-    pub async fn open_incident_start_all(
+    /// strictly later recovery. What survives is each monitor's open run, whole.
+    pub async fn open_run_all(
         &self,
         at: i64,
-    ) -> Result<HashMap<i64, TransitionRow>, sqlx::Error> {
+    ) -> Result<HashMap<i64, Vec<TransitionRow>>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT monitor_id, status, message, at FROM (
-                 SELECT monitor_id, status, message, at,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY monitor_id ORDER BY at ASC, id ASC
-                        ) AS rn
-                 FROM (
-                     SELECT monitor_id, status, message, at, id,
-                            MAX(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) OVER (
-                                PARTITION BY monitor_id ORDER BY at DESC, id DESC
-                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                            ) AS ok_after
-                     FROM status_transitions WHERE at <= ?1
-                 ) WHERE status != 'ok' AND ok_after = 0
-             ) WHERE rn = 1",
+                 SELECT monitor_id, status, message, at, id,
+                        MAX(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) OVER (
+                            PARTITION BY monitor_id ORDER BY at DESC, id DESC
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) AS ok_after
+                 FROM status_transitions WHERE at <= ?1
+             ) WHERE status != 'ok' AND ok_after = 0
+             ORDER BY monitor_id ASC, at ASC, id ASC",
         )
         .bind(at)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                let monitor_id: i64 = r.try_get("monitor_id").unwrap_or_default();
-                (monitor_id, row_to_transition(r))
-            })
-            .collect())
+        let mut out: HashMap<i64, Vec<TransitionRow>> = HashMap::new();
+        for r in rows {
+            let monitor_id: i64 = r.try_get("monitor_id").unwrap_or_default();
+            out.entry(monitor_id)
+                .or_default()
+                .push(row_to_transition(r));
+        }
+        Ok(out)
     }
 
     /// Components that were non-Ok at any point in `[start, end]`, folded per
@@ -574,18 +581,17 @@ impl Store {
             None => self.list_monitors().await?,
         };
         let now = now_epoch();
-        // The transition that *opened* the incident in force at `since`, not
-        // merely the last one before it: a run of non-Ok commits with no
-        // intervening Ok would otherwise report `started_at` at the run's tail,
-        // making the same incident look shorter through a narrower window.
-        let mut priors = self.open_incident_start_all(since).await?;
+        // The run still open at `since` is prepended whole, not summarized into
+        // a single seed row: its start *and* every escalation within it happened
+        // before the window, and both belong to the incident.
+        let mut open_runs = self.open_run_all(since).await?;
         let mut transitions = self.transitions_since_all(since).await?;
 
         let mut out = Vec::new();
         for monitor in monitors {
-            let rows = transitions.remove(&monitor.id).unwrap_or_default();
-            let prior = priors.remove(&monitor.id);
-            for incident in compute_incidents(prior.as_ref(), &rows, now) {
+            let mut rows = open_runs.remove(&monitor.id).unwrap_or_default();
+            rows.extend(transitions.remove(&monitor.id).unwrap_or_default());
+            for incident in compute_incidents(&rows, now) {
                 if incident.started_at > until {
                     continue;
                 }
@@ -694,9 +700,9 @@ impl Store {
         let mut status = build_status(monitor, row);
         let now = now_epoch();
         let window_start = now - RECENT_WINDOW_SECS;
-        let prior = self.open_incident_start(id, window_start).await?;
-        let transitions = self.get_transitions_since(id, window_start).await?;
-        status.recent_incidents = compute_incidents(prior.as_ref(), &transitions, now);
+        let mut transitions = self.open_run(id, window_start).await?;
+        transitions.extend(self.get_transitions_since(id, window_start).await?);
+        status.recent_incidents = compute_incidents(&transitions, now);
         status.recent_incidents.truncate(RECENT_LIMIT);
         Ok(Some(status))
     }
@@ -707,13 +713,13 @@ impl Store {
         let window_start = now - RECENT_WINDOW_SECS;
         // Two batched reads for the whole board, not two per monitor: this is
         // the path a dashboard polls every 60s.
-        let mut priors = self.open_incident_start_all(window_start).await?;
+        let mut open_runs = self.open_run_all(window_start).await?;
         let mut transitions = self.transitions_since_all(window_start).await?;
 
         let mut out = Vec::with_capacity(monitors.len());
         for monitor in monitors {
-            let rows = transitions.remove(&monitor.id).unwrap_or_default();
-            let prior = priors.remove(&monitor.id);
+            let mut rows = open_runs.remove(&monitor.id).unwrap_or_default();
+            rows.extend(transitions.remove(&monitor.id).unwrap_or_default());
             let row = sqlx::query(
                 "SELECT status, message, components_json, updated_at
                  FROM status_current WHERE monitor_id = ?1",
@@ -722,7 +728,7 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
             let mut status = build_status(monitor, row);
-            status.recent_incidents = compute_incidents(prior.as_ref(), &rows, now);
+            status.recent_incidents = compute_incidents(&rows, now);
             status.recent_incidents.truncate(RECENT_LIMIT);
             out.push(status);
         }
@@ -1134,7 +1140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_incident_start_returns_the_earliest_of_a_non_ok_run() {
+    async fn open_run_returns_the_whole_non_ok_run() {
         // Consecutive non-Ok commits with no intervening Ok are not
         // theoretical: the scheduler's debounce lives in memory, so a restart
         // re-commits the status the monitor is already in.
@@ -1151,19 +1157,25 @@ mod tests {
         s.insert_transition_at(m.id, Status::Degraded, "disk3 failing", 4_000)
             .await;
 
-        // The run opened at 2_000, not at the 4_000 re-commit and not at the
-        // already-closed outage at 100.
-        let open = s.open_incident_start(m.id, 5_000).await.unwrap().unwrap();
-        assert_eq!(open.at, 2_000);
-        assert_eq!(open.status, Status::Degraded);
+        // The run is 2_000..4_000 ascending — every row of it, so an escalation
+        // anywhere inside is visible. The already-closed outage at 100 is not
+        // part of it.
+        let open = s.open_run(m.id, 5_000).await.unwrap();
         assert_eq!(
-            s.open_incident_start_all(5_000)
+            open.iter().map(|r| r.at).collect::<Vec<_>>(),
+            vec![2_000, 3_000, 4_000]
+        );
+        assert_eq!(open[0].status, Status::Degraded);
+        assert_eq!(
+            s.open_run_all(5_000)
                 .await
                 .unwrap()
                 .get(&m.id)
                 .unwrap()
-                .at,
-            2_000
+                .iter()
+                .map(|r| r.at)
+                .collect::<Vec<_>>(),
+            vec![2_000, 3_000, 4_000]
         );
         // Uptime's view is unchanged: it wants the status in force at 5_000,
         // which really is the 4_000 row.
@@ -1178,19 +1190,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_incident_start_is_none_when_ok_or_absent() {
+    async fn open_run_is_empty_when_ok_or_absent() {
         let s = store().await;
         let m = s.create_monitor(sample()).await.unwrap();
         // No transitions at all: nothing is open, and no incident is faked.
-        assert!(s.open_incident_start(m.id, 5_000).await.unwrap().is_none());
-        assert!(s.open_incident_start_all(5_000).await.unwrap().is_empty());
+        assert!(s.open_run(m.id, 5_000).await.unwrap().is_empty());
+        assert!(s.open_run_all(5_000).await.unwrap().is_empty());
 
         s.insert_transition_at(m.id, Status::Critical, "down", 1_000)
             .await;
         s.insert_transition_at(m.id, Status::Ok, "recovered", 2_000)
             .await;
-        assert!(s.open_incident_start(m.id, 3_000).await.unwrap().is_none());
-        assert!(s.open_incident_start_all(3_000).await.unwrap().is_empty());
+        assert!(s.open_run(m.id, 3_000).await.unwrap().is_empty());
+        assert!(s.open_run_all(3_000).await.unwrap().is_empty());
         // The monitor's actual status at 3_000 is still Ok — the query uptime
         // relies on must keep saying so.
         assert_eq!(
@@ -1240,6 +1252,51 @@ mod tests {
         // 24h window and must not disagree either.
         let inline = s.list_status().await.unwrap();
         assert_eq!(inline[0].recent_incidents[0], day[0].incident);
+    }
+
+    #[tokio::test]
+    async fn an_escalation_before_the_window_is_not_under_reported() {
+        // Degraded Monday, escalated to critical Tuesday, recovered today.
+        // Through a 24h window the escalation row sits before the window start:
+        // seeding from a single prior row would show a critical outage as
+        // degraded, with the degraded message. Severity must not depend on how
+        // far back the caller happened to ask.
+        let s = store().await;
+        let m = s.create_monitor(sample()).await.unwrap();
+        let now = now_epoch();
+        s.insert_transition_at(m.id, Status::Ok, "up", now - 500_000)
+            .await;
+        s.insert_transition_at(m.id, Status::Degraded, "disk3 failing", now - 400_000)
+            .await;
+        s.insert_transition_at(
+            m.id,
+            Status::Critical,
+            "disk3 and disk4 failing",
+            now - 200_000,
+        )
+        .await;
+        s.insert_transition_at(m.id, Status::Ok, "recovered", now - 10_000)
+            .await;
+
+        let day = s.list_incidents(now - 86_400, now, None, 50).await.unwrap();
+        let week = s
+            .list_incidents(now - 7 * 86_400, now, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(day.len(), 1);
+        assert_eq!(week.len(), 1);
+        assert_eq!(day[0].incident, week[0].incident);
+        assert_eq!(day[0].incident.worst_status, Status::Critical);
+        assert_eq!(day[0].incident.message, "disk3 and disk4 failing");
+        assert_eq!(day[0].incident.started_at, now - 400_000);
+        assert_eq!(day[0].incident.duration_secs, 390_000);
+
+        // The inline `/status` path reads the same event through its own fixed
+        // 24h window and must not disagree either.
+        let inline = s.list_status().await.unwrap();
+        assert_eq!(inline[0].recent_incidents[0], day[0].incident);
+        let single = s.get_status(m.id).await.unwrap().unwrap();
+        assert_eq!(single.recent_incidents[0], day[0].incident);
     }
 
     #[tokio::test]
