@@ -6,8 +6,11 @@ on:
     tags: ['v*.*.*']
   workflow_dispatch:
 
-# main-push and tag-push are different refs and can run concurrently.
-# That is fine: they write disjoint tag sets.
+# main-push and tag-push are different refs and can run concurrently, since the
+# group below keys on github.ref. That is only safe because they write disjoint
+# tag sets — see the `enable={{is_default_branch}}` on the sha rule below, which
+# is what actually makes it true. Without it both refs emit sha-<short> for the
+# release commit and the later run silently repoints it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -42,10 +45,24 @@ jobs:
           # latest to non-prerelease semver tags. Adding the raw rule too makes
           # latest land on BOTH paths, so it bounces between "tip of main" and
           # "newest release" depending on which workflow ran last.
+          #
+          # sha- is restricted to main. A release commit is reached twice — as a
+          # push to main and as the vX.Y.Z tag — and type=sha has no ref
+          # restriction by default, so both runs would emit sha-<short> for the
+          # same commit. They race, and since Docker builds are not
+          # byte-reproducible, whichever finishes last repoints sha-<short> at a
+          # different digest. That makes the one tag meant to identify an exact
+          # build the one tag you cannot trust. Restricting it to main makes it
+          # single-writer and deterministic.
+          #
+          # This removes the race, not the second build: the release commit is
+          # still built once per ref, so sha-<short> and X.Y.Z remain distinct
+          # digests of identical source. Verify a release by comparing the three
+          # version tags to each other, not to sha-<short>.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
+            type=sha,prefix=sha-,enable={{is_default_branch}}
 
       - uses: docker/build-push-action@v6
         with:
