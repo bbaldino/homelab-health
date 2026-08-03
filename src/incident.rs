@@ -58,18 +58,26 @@ pub struct IncidentDetail {
 
 /// Group committed status transitions into incidents.
 ///
-/// `prior` is the last transition at or before the window start, and
+/// `prior` is the transition that *opened* the incident in force at the window
+/// start — the earliest non-Ok transition after the last Ok at or before it,
+/// not merely the last transition before it. A monitor can commit several
+/// non-Ok transitions in a row with no intervening Ok (the scheduler's debounce
+/// is in-memory, so a restart re-commits the current status), and seeding from
+/// the tail of that run would report `started_at` too late, differently for
+/// every window size. See `Store::open_incident_start`.
+///
 /// `transitions` must be ascending by `at`; out-of-order input misgroups
 /// incidents. `failing_components` is deliberately not computed here — it comes
 /// from a sample scan in the store, keeping this grouping pure and DB-free.
 ///
 /// Returns newest first.
 ///
-/// A `prior` of `None` means no transition exists at or before the window
-/// start, so the monitor's status going into the window is unknown *by
-/// absence*. No incident opens for it. This diverges from `compute_uptime`,
-/// which honestly counts that span as `unknown_secs`: absence of data is not
-/// evidence of failure, and a brand-new monitor must not fake an outage.
+/// A `prior` of `None` means no incident was open at the window start: either
+/// the monitor was Ok, or nothing was ever recorded and its status is unknown
+/// *by absence*. Neither opens an incident. The latter diverges from
+/// `compute_uptime`, which honestly counts that span as `unknown_secs`: absence
+/// of data is not evidence of failure, and a brand-new monitor must not fake an
+/// outage.
 pub fn compute_incidents(
     prior: Option<&TransitionRow>,
     transitions: &[TransitionRow],
@@ -220,6 +228,23 @@ mod tests {
         assert_eq!(incidents[0].ended_at, Some(1200));
         assert_eq!(incidents[0].duration_secs, 500);
         assert_eq!(incidents[0].message, "down");
+    }
+
+    #[test]
+    fn re_committed_status_inside_the_window_does_not_move_the_start() {
+        // A restart re-commits the status the monitor is already in. That row
+        // must fold into the open incident rather than restating when it began.
+        let incidents = compute_incidents(
+            Some(&t(Status::Degraded, "disk3 failing", 700)),
+            &[
+                t(Status::Degraded, "disk3 failing", 1100),
+                t(Status::Ok, "recovered", 1200),
+            ],
+            1300,
+        );
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].started_at, 700);
+        assert_eq!(incidents[0].duration_secs, 500);
     }
 
     #[test]
