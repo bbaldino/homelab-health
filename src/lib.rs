@@ -1,6 +1,7 @@
 pub mod api;
 pub mod check;
 pub mod config;
+pub mod incident;
 pub mod report;
 pub mod scheduler;
 pub mod status;

@@ -1,9 +1,21 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import type { MonitorStatus, Status } from "../types";
+import type { Incident, MonitorStatus, Status } from "../types";
 import { MonitorDetail } from "./MonitorDetail";
+import { formatDuration } from "./IncidentRow";
 
 function statusLabel(status: Status | null): string {
   return status ?? "unknown";
+}
+
+/**
+ * The badge only carries a count, so its tooltip describes the newest
+ * incident — enough to judge whether the card is worth expanding.
+ */
+function incidentBadgeTitle(incidents: Incident[]): string {
+  const newest = incidents[0];
+  const started = new Date(newest.started_at * 1000).toLocaleString();
+  const state = newest.ended_at === null ? "ongoing" : "recovered";
+  return `Most recent: ${newest.worst_status} for ${formatDuration(newest.duration_secs)} from ${started} (${state}) — ${newest.message || "no message"}`;
 }
 
 interface MonitorCardProps {
@@ -22,6 +34,7 @@ export function MonitorCard({ monitor, onEdit, onDelete, onRunNow }: MonitorCard
   const triggerRef = useRef<HTMLButtonElement>(null);
   const hasComponents = monitor.components.length > 0;
   const status = statusLabel(monitor.status);
+  const incidentCount = monitor.recent_incidents.length;
 
   // The menu is rendered with position:fixed (anchored to the trigger's
   // viewport rect) rather than position:absolute, so it isn't clipped by
@@ -92,6 +105,12 @@ export function MonitorCard({ monitor, onEdit, onDelete, onRunNow }: MonitorCard
           <span class="monitor-message">
             {monitor.message ?? (monitor.status === null ? "not yet checked" : "")}
           </span>
+          {incidentCount > 0 && (
+            <span class="incident-badge" title={incidentBadgeTitle(monitor.recent_incidents)}>
+              <span class="dot dot-degraded" aria-hidden="true" />
+              {incidentCount} incident{incidentCount === 1 ? "" : "s"} · 24h
+            </span>
+          )}
           <span class={`chevron ${expanded ? "chevron-open" : ""}`} aria-hidden="true">
             ▸
           </span>

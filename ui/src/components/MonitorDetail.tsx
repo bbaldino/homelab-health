@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../api";
-import type { Sample, Status, Uptime } from "../types";
+import type { IncidentDetail, Sample, Status, Uptime } from "../types";
+import { IncidentRow } from "./IncidentRow";
 
 const HISTORY_LIMIT = 100;
 
@@ -15,15 +16,18 @@ interface MonitorDetailProps {
 
 /**
  * Forensic detail for a monitor: an uptime timeline bar (with a 24h/7d
- * window toggle) plus a reverse-chronological history list. Mounted only
- * while the parent card is expanded, so it fetches fresh data each time
- * it's opened.
+ * window toggle), the incidents it has had, and a reverse-chronological
+ * history list. Mounted only while the parent card is expanded, so it
+ * fetches fresh data each time it's opened.
  */
 export function MonitorDetail({ monitorId }: MonitorDetailProps) {
   const [windowSecs, setWindowSecs] = useState<number>(WINDOWS[0].secs);
   const [uptime, setUptime] = useState<Uptime | null>(null);
   const [uptimeLoading, setUptimeLoading] = useState(true);
   const [uptimeError, setUptimeError] = useState<string | null>(null);
+  const [incidents, setIncidents] = useState<IncidentDetail[] | null>(null);
+  const [incidentsLoading, setIncidentsLoading] = useState(true);
+  const [incidentsError, setIncidentsError] = useState<string | null>(null);
   const [history, setHistory] = useState<Sample[] | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -49,6 +53,28 @@ export function MonitorDetail({ monitorId }: MonitorDetailProps) {
       cancelled = true;
     };
   }, [monitorId, windowSecs]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIncidentsLoading(true);
+    setIncidentsError(null);
+    api
+      .getIncidents({ monitorId })
+      .then((data) => {
+        if (!cancelled) setIncidents(data);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setIncidentsError(err instanceof Error ? err.message : String(err));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIncidentsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [monitorId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -97,6 +123,29 @@ export function MonitorDetail({ monitorId }: MonitorDetailProps) {
           <div class="detail-loading">Loading uptime…</div>
         )}
         {!uptimeError && !uptimeLoading && uptime && <UptimeBuckets uptime={uptime} />}
+      </section>
+
+      <section class="incidents-section">
+        <div class="history-header">Incidents · last 7d</div>
+        {incidentsError && (
+          <div class="detail-error">Failed to load incidents: {incidentsError}</div>
+        )}
+        {!incidentsError && incidentsLoading && (
+          <div class="detail-loading">Loading incidents…</div>
+        )}
+        {!incidentsError && !incidentsLoading && incidents && incidents.length === 0 && (
+          <div class="detail-empty">No incidents in this window.</div>
+        )}
+        {!incidentsError && !incidentsLoading && incidents && incidents.length > 0 && (
+          <ul class="incident-list">
+            {incidents.map((incident) => (
+              <IncidentRow
+                key={`${incident.monitor_id}-${incident.started_at}`}
+                incident={incident}
+              />
+            ))}
+          </ul>
+        )}
       </section>
 
       <section class="history-section">

@@ -31,14 +31,55 @@ export interface NewMonitor {
 }
 
 /**
+ * A bounded period during which a monitor was not Ok. Timestamps are unix
+ * epoch-seconds. `ended_at` is null while the incident is still ongoing —
+ * there is deliberately no separate "resolved" flag.
+ */
+export interface Incident {
+  started_at: number;
+  ended_at: number | null;
+  duration_secs: number;
+  worst_status: Status;
+  message: string;
+}
+
+/**
+ * A component that was non-Ok at some point during an incident, folded over
+ * the incident's whole lifetime rather than snapshotted from one sample.
+ * Healthy components during an outage are omitted.
+ */
+export interface FailingComponent {
+  name: string;
+  worst_status: Status;
+  critical: boolean;
+  message: string;
+  first_seen: number;
+  last_seen: number;
+}
+
+/**
+ * An incident as returned by GET /incidents: identified by monitor and
+ * carrying the per-component detail that the inline /status shape omits.
+ * `failing_components` is empty for checks that emit no components (http,
+ * tcp) and for incidents whose samples have aged out of the 7-day prune.
+ */
+export interface IncidentDetail extends Incident {
+  monitor_id: number;
+  monitor_name: string;
+  failing_components: FailingComponent[];
+}
+
+/**
  * A monitor plus its latest known status. `status` is null until the first
- * check has run for this monitor.
+ * check has run for this monitor. `recent_incidents` covers the last 24h,
+ * newest 5, without per-component detail.
  */
 export interface MonitorStatus extends Monitor {
   status: Status | null;
   message: string | null;
   components: Component[];
   updated_at: string | null;
+  recent_incidents: Incident[];
 }
 
 /** One field in a check type's config schema. */
