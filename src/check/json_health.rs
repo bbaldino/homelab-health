@@ -293,20 +293,34 @@ impl CheckType for JsonHealthCheck {
             Err(e) => return CheckReport::new(Status::Unknown, format!("request failed: {e}")),
         };
 
+        // Captured before the body is consumed, and reported only when decoding
+        // fails. A decode failure alone cannot distinguish "the service
+        // returned garbage" from "a reverse proxy in front of it returned an
+        // HTML error page because it could not reach the service" — the status
+        // is the only thing in the response that separates them.
+        let status = resp.status();
+
         // Parse once as a raw Value so field rules can read arbitrary fields,
         // then map the contract shape from it. Parse regardless of HTTP status
         // (a 503-on-critical service still has a readable body per the health
-        // contract).
+        // contract), so the status is NOT used to reject a response — only to
+        // explain one that failed to decode.
         let value: Value = match resp.json().await {
             Ok(v) => v,
             Err(e) => {
-                return CheckReport::new(Status::Unknown, format!("invalid health body: {e}"));
+                return CheckReport::new(
+                    Status::Unknown,
+                    format!("invalid health body (HTTP {status}): {e}"),
+                );
             }
         };
         let body: HealthBody = match serde_json::from_value(value.clone()) {
             Ok(b) => b,
             Err(e) => {
-                return CheckReport::new(Status::Unknown, format!("invalid health body: {e}"));
+                return CheckReport::new(
+                    Status::Unknown,
+                    format!("invalid health body (HTTP {status}): {e}"),
+                );
             }
         };
 
@@ -481,6 +495,55 @@ mod tests {
         let report = JsonHealthCheck.run(&json!({ "url": server.uri() })).await;
         assert_eq!(report.status, Status::Critical);
         assert_eq!(report.message, "datastore down");
+    }
+
+    #[tokio::test]
+    async fn non_json_body_reports_the_http_status() {
+        // A reverse proxy's 502 page is HTML, not JSON. Without the status in
+        // the message, "invalid health body" reads as "the service returned
+        // garbage" — but a 502 means the proxy could not reach the service at
+        // all. Those are different faults in different places, and the status
+        // is the only thing in the response that tells them apart.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(502)
+                    .set_body_string("<html><head><title>502 Bad Gateway</title></head></html>")
+                    .insert_header("content-type", "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let report = JsonHealthCheck.run(&json!({ "url": server.uri() })).await;
+        assert_eq!(report.status, Status::Unknown);
+        assert!(
+            report.message.contains("502"),
+            "message must carry the HTTP status, got: {}",
+            report.message
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_shaped_json_reports_the_http_status() {
+        // Valid JSON whose types don't match the contract. Note every
+        // HealthBody field is #[serde(default)], so a merely *unfamiliar*
+        // object like {"nope": 1} deserializes fine and is caught later by the
+        // neither-status-nor-components check — reaching this path takes a real
+        // type mismatch. The status is less diagnostic here than for a proxy
+        // error, but carrying it keeps both decode failures reading the same.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "components": "not-an-array" })),
+            )
+            .mount(&server)
+            .await;
+        let report = JsonHealthCheck.run(&json!({ "url": server.uri() })).await;
+        assert_eq!(report.status, Status::Unknown);
+        assert!(
+            report.message.contains("200"),
+            "message must carry the HTTP status, got: {}",
+            report.message
+        );
     }
 
     #[tokio::test]
