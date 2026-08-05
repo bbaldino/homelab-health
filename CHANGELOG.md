@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/bbaldino/homelab-health/compare/v0.3.2...v0.3.3) - 2026-08-05
+
+### Fixed
+
+- report the HTTP status when a health body fails to decode
+
+### Other
+
+- run auto-merge unconditionally so it cannot silently stop
+
 ## [0.3.2](https://github.com/bbaldino/homelab-health/compare/v0.3.1...v0.3.2) - 2026-08-03
 
 ### Added
